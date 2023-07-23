@@ -84,6 +84,7 @@ var (
 	BuildPGOFile           string                  // profile selected by -pgo flag, an absolute path (if not empty)
 	BuildPkgdir            string                  // -pkgdir flag
 	BuildRace              bool                    // -race flag
+	BuildDataflow          bool                    // -datflow flag
 	BuildToolexec          []string                // -toolexec flag
 	BuildToolchainName     string
 	BuildToolchainCompiler func() string

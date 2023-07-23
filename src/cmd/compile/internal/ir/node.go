@@ -439,15 +439,16 @@ type PragmaFlag uint16
 
 const (
 	// Func pragmas.
-	Nointerface      PragmaFlag = 1 << iota
-	Noescape                    // func parameters don't escape
-	Norace                      // func must not have race detector annotations
-	Nosplit                     // func should not execute on separate stack
-	Noinline                    // func should not be inlined
-	NoCheckPtr                  // func should not be instrumented by checkptr
-	CgoUnsafeArgs               // treat a pointer to one arg as a pointer to them all
-	UintptrKeepAlive            // pointers converted to uintptr must be kept alive
-	UintptrEscapes              // pointers converted to uintptr escape
+	Nointerface PragmaFlag = 1 << iota
+	Noescape               // func parameters don't escape
+	Norace                 // func must not have race detector annotations
+	Dataflow
+	Nosplit          // func should not execute on separate stack
+	Noinline         // func should not be inlined
+	NoCheckPtr       // func should not be instrumented by checkptr
+	CgoUnsafeArgs    // treat a pointer to one arg as a pointer to them all
+	UintptrKeepAlive // pointers converted to uintptr must be kept alive
+	UintptrEscapes   // pointers converted to uintptr escape
 
 	// Runtime-only func pragmas.
 	// See ../../../../runtime/HACKING.md for detailed descriptions.

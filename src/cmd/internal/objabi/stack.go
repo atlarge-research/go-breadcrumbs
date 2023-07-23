@@ -4,7 +4,9 @@
 
 package objabi
 
-import "internal/buildcfg"
+import (
+	"internal/buildcfg"
+)
 
 // For the linkers. Must match Go definitions.
 
@@ -36,5 +38,6 @@ func stackGuardMultiplier(race bool) int {
 	if race {
 		n += 1
 	}
+
 	return n
 }

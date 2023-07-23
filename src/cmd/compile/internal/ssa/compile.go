@@ -456,6 +456,7 @@ commas. For example:
 // list of passes for the compiler
 var passes = [...]pass{
 	// TODO: combine phielim and copyelim into a single pass?
+	{name: "dataflow instrumentation", fn: dataflowInstrument, required: true},
 	{name: "number lines", fn: numberLines, required: true},
 	{name: "early phielim", fn: phielim},
 	{name: "early copyelim", fn: copyelim},
@@ -520,6 +521,7 @@ type constraint struct {
 }
 
 var passOrder = [...]constraint{
+	{"dataflow instrumentation", "number lines"},
 	// "insert resched checks" uses mem, better to clean out stores first.
 	{"dse", "insert resched checks"},
 	// insert resched checks adds new blocks containing generic instructions

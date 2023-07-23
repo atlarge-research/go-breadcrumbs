@@ -25,6 +25,7 @@ const (
 	funcPragmas = ir.Nointerface |
 		ir.Noescape |
 		ir.Norace |
+		ir.Dataflow |
 		ir.Nosplit |
 		ir.Noinline |
 		ir.NoCheckPtr |
@@ -50,6 +51,8 @@ func pragmaFlag(verb string) ir.PragmaFlag {
 		return ir.Noescape
 	case "go:norace":
 		return ir.Norace
+	case "go:dataflow":
+		return ir.Dataflow
 	case "go:nosplit":
 		return ir.Nosplit | ir.NoCheckPtr // implies NoCheckPtr (see #34972)
 	case "go:noinline":

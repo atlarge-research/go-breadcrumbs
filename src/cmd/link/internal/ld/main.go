@@ -68,6 +68,7 @@ var (
 	flagInstallSuffix = flag.String("installsuffix", "", "set package directory `suffix`")
 	flagDumpDep       = flag.Bool("dumpdep", false, "dump symbol dependency graph")
 	flagRace          = flag.Bool("race", false, "enable race detector")
+	flagDataflow      = flag.Bool("dataflow", false, "enable dynamic dataflow analysis")
 	flagMsan          = flag.Bool("msan", false, "enable MSan interface")
 	flagAsan          = flag.Bool("asan", false, "enable ASan interface")
 	flagAslr          = flag.Bool("aslr", true, "enable ASLR for buildmode=c-shared on windows")

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"cmd/compile/internal/base"
 	"cmd/compile/internal/coverage"
+	"cmd/compile/internal/dataflow"
 	"cmd/compile/internal/deadcode"
 	"cmd/compile/internal/devirtualize"
 	"cmd/compile/internal/dwarfgen"
@@ -112,7 +113,8 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// Record flags that affect the build result. (And don't
 	// record flags that don't, since that would cause spurious
 	// changes in the binary.)
-	dwarfgen.RecordFlags("B", "N", "l", "msan", "race", "asan", "shared", "dynlink", "dwarf", "dwarflocationlists", "dwarfbasentries", "smallframes", "spectre")
+	dwarfgen.RecordFlags("B", "N", "l", "msan", "race", "asan", "dataflow",
+		"shared", "dynlink", "dwarf", "dwarflocationlists", "dwarfbasentries", "smallframes", "spectre")
 
 	if !base.EnableTrace && base.Flag.LowerT {
 		log.Fatalf("compiler not built with support for -t")
@@ -302,6 +304,8 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// queue for scheduling function compilation so components don't
 	// need to adjust their behavior depending on when they're called.
 	reflectdata.AfterGlobalEscapeAnalysis = true
+
+	dataflow.Funcs(typecheck.Target.Decls)
 
 	// Collect information for go:nowritebarrierrec
 	// checking. This must happen before transforming closures during Walk

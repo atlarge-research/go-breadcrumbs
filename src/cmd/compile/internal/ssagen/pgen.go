@@ -171,6 +171,7 @@ func (s *ssafn) AllocFrame(f *ssa.Func) {
 		n.SetFrameOffset(-s.stksize)
 	}
 
+	// s.stksize = types.RoundUp(s.stksize*2, s.stkalign) // Double stack size to store metadata info
 	s.stksize = types.RoundUp(s.stksize, s.stkalign)
 	s.stkptrsize = types.RoundUp(s.stkptrsize, s.stkalign)
 }

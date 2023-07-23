@@ -89,6 +89,7 @@ func InitConfig() {
 	types.NewPtrCacheEnabled = false
 	ssaConfig = ssa.NewConfig(base.Ctxt.Arch.Name, *types_, base.Ctxt, base.Flag.N == 0, Arch.SoftFloat)
 	ssaConfig.Race = base.Flag.Race
+	ssaConfig.Dataflow = base.Flag.Dataflow
 	ssaCaches = make([]ssa.Cache, base.Flag.LowerC)
 
 	// Set up some runtime functions we'll need to call.
@@ -349,7 +350,7 @@ func buildssa(fn *ir.Func, worker int) *ssa.Func {
 	}
 	s.curfn = fn
 
-	s.f = ssa.NewFunc(&fe)
+	s.f = ssa.NewFunc(&fe, (fn.Pragma&ir.Dataflow) != 0)
 	s.config = ssaConfig
 	s.f.Type = fn.Type()
 	s.f.Config = ssaConfig

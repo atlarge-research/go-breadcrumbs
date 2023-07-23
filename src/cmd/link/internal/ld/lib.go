@@ -399,6 +399,9 @@ func libinit(ctxt *Link) {
 	} else if *flagAsan {
 		suffixsep = "_"
 		suffix = "asan"
+	} else if *flagDataflow {
+		suffixsep = "_"
+		suffix = "dataflow"
 	}
 
 	if buildcfg.GOROOT != "" {
@@ -559,6 +562,9 @@ func (ctxt *Link) loadlib() {
 	if *flagAsan {
 		loadinternal(ctxt, "runtime/asan")
 	}
+	// if *flagDataflow {
+	// 	fmt.Println("cool1")
+	// }
 	loadinternal(ctxt, "runtime")
 	for ; i < len(ctxt.Library); i++ {
 		lib := ctxt.Library[i]

@@ -18,14 +18,15 @@ import (
 // This package compiles each Func independently.
 // Funcs are single-use; a new Func must be created for every compiled function.
 type Func struct {
-	Config *Config     // architecture information
-	Cache  *Cache      // re-usable cache
-	fe     Frontend    // frontend state associated with this Func, callbacks into compiler frontend
-	pass   *pass       // current pass information (name, options, etc.)
-	Name   string      // e.g. NewFunc or (*Func).NumBlocks (no package prefix)
-	Type   *types.Type // type signature of the function.
-	Blocks []*Block    // unordered set of all basic blocks (note: not indexable by ID)
-	Entry  *Block      // the entry basic block
+	Config   *Config  // architecture information
+	Cache    *Cache   // re-usable cache
+	fe       Frontend // frontend state associated with this Func, callbacks into compiler frontend
+	Dataflow bool
+	pass     *pass       // current pass information (name, options, etc.)
+	Name     string      // e.g. NewFunc or (*Func).NumBlocks (no package prefix)
+	Type     *types.Type // type signature of the function.
+	Blocks   []*Block    // unordered set of all basic blocks (note: not indexable by ID)
+	Entry    *Block      // the entry basic block
 
 	bid idAlloc // block ID allocator
 	vid idAlloc // value ID allocator
@@ -91,8 +92,9 @@ type LocalSlotSplitKey struct {
 
 // NewFunc returns a new, empty function object.
 // Caller must set f.Config and f.Cache before using f.
-func NewFunc(fe Frontend) *Func {
-	return &Func{fe: fe, NamedValues: make(map[LocalSlot][]*Value), CanonicalLocalSlots: make(map[LocalSlot]*LocalSlot), CanonicalLocalSplits: make(map[LocalSlotSplitKey]*LocalSlot)}
+func NewFunc(fe Frontend, trackDataflow bool) *Func {
+	return &Func{fe: fe, Dataflow: trackDataflow,
+		NamedValues: make(map[LocalSlot][]*Value), CanonicalLocalSlots: make(map[LocalSlot]*LocalSlot), CanonicalLocalSplits: make(map[LocalSlotSplitKey]*LocalSlot)}
 }
 
 // NumBlocks returns an integer larger than the id of any Block in the Func.

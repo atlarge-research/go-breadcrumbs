@@ -48,8 +48,9 @@ type Config struct {
 	useHmul        bool        // Use optimizations that need Hmul* operations
 	SoftFloat      bool        //
 	Race           bool        // race detector enabled
-	BigEndian      bool        //
-	UseFMA         bool        // Use hardware FMA operation
+	Dataflow       bool
+	BigEndian      bool //
+	UseFMA         bool // Use hardware FMA operation
 }
 
 type (
