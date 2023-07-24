@@ -21,6 +21,12 @@ func walkStmt(n ir.Node) ir.Node {
 
 	walkStmtList(n.Init())
 
+	// if ir.CurFunc.Pragma&ir.Dataflow != 0 {
+	// 	log.Println(n.Op().String())
+	// 	log.Println(n.Op())
+	// 	log.Println("-----")
+	// }
+
 	switch n.Op() {
 	default:
 		if n.Op() == ir.ONAME {

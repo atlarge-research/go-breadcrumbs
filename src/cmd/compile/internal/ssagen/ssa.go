@@ -5205,6 +5205,7 @@ func (s *state) call(n *ir.CallExpr, k callKind, returnResultAddr bool) *ssa.Val
 			call = s.newValue1A(ssa.OpInterLECall, aux.LateExpansionResultType(), aux, codeptr)
 		case callee != nil:
 			aux := ssa.StaticAuxCall(callTargetLSym(callee), params)
+			aux.Dataflow = (callee.Pragma()&ir.Dataflow != 0)
 			call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 			if k == callTail {
 				call.Op = ssa.OpTailLECall

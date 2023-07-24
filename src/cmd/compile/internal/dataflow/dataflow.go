@@ -1,9 +1,11 @@
 package dataflow
 
 import (
+	"bufio"
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
 	"log"
+	"os"
 )
 
 func Funcs(all []ir.Node) {
@@ -26,6 +28,7 @@ func instrument(fn *ir.Func) {
 	prevParamsFields := ft.Params.FieldSlice()
 	prevParamsSize := len(prevParamsFields)
 	newParamsFields := make([]*types.Field, 2*prevParamsSize)
+	paramsDf := make([]*ir.Name, prevParamsSize)
 	for i := 0; i < prevParamsSize; i++ {
 		prevField := prevParamsFields[i]
 		newParamsFields[i] = prevField
@@ -40,11 +43,11 @@ func instrument(fn *ir.Func) {
 		newName.Curfn = prevField.Nname.(*ir.Name).Curfn
 		newName.SetType(intType)
 
-		// paramNameToDfNameMap[prevSym.Name] = newName
 		newField := types.NewField(prevField.Pos, newSym, intType)
 		newField.Nname = newName
 
 		newParamsFields[i+prevParamsSize] = newField
+		paramsDf[i] = newName
 	}
 	newParamsStruct := types.NewStruct(types.NoPkg, newParamsFields)
 	newParamsStruct.StructType().Funarg = ft.Params.StructType().Funarg
@@ -54,6 +57,7 @@ func instrument(fn *ir.Func) {
 	prevResultsFields := ft.Results.FieldSlice()
 	prevResultsSize := len(prevResultsFields)
 	newResultsFields := make([]*types.Field, 2*prevResultsSize)
+	resultsDf := make([]ir.Node, prevResultsSize)
 	for i := 0; i < prevResultsSize; i++ {
 		prevResField := prevResultsFields[i]
 		newResultsFields[i] = prevResField
@@ -72,8 +76,27 @@ func instrument(fn *ir.Func) {
 		newField.Nname = newName
 
 		newResultsFields[i+prevResultsSize] = newField
+		resultsDf[i] = newName
 	}
 	newResultsStruct := types.NewStruct(types.NoPkg, newResultsFields)
 	newResultsStruct.StructType().Funarg = ft.Results.StructType().Funarg
 	ft.Results = newResultsStruct
+
+	// Receive params dataflow from caller
+	fn.Dcl = append(fn.Dcl, paramsDf...)
+
+	f, _ := os.Create("humm_ast.dump")
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	ir.FDumpList(w, "cool", fn.Body)
+	w.Flush()
+
+	for _, n := range fn.Body {
+		if n.Op() == ir.ORETURN {
+			n := n.(*ir.ReturnStmt)
+
+			// Send back dataflow of return values to caller
+			n.Results = append(n.Results, resultsDf...)
+		}
+	}
 }

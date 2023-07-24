@@ -109,9 +109,10 @@ func (a *AuxNameOffset) FrameOffset() int64 {
 }
 
 type AuxCall struct {
-	Fn      *obj.LSym
-	reg     *regInfo // regInfo for this call
-	abiInfo *abi.ABIParamResultInfo
+	Fn       *obj.LSym
+	reg      *regInfo // regInfo for this call
+	abiInfo  *abi.ABIParamResultInfo
+	Dataflow bool
 }
 
 // Reg returns the regInfo for a given call, combining the derived in/out register masks
