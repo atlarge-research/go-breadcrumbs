@@ -24,7 +24,8 @@ func dataflowInstrument(f *Func) {
 				// func signature modification
 
 				auxCall := currentVal.Aux.(*AuxCall)
-				if !auxCall.Dataflow {
+				// For some calls, auxCall is nil, figure out why
+				if auxCall == nil || !auxCall.Dataflow {
 					continue
 				}
 
