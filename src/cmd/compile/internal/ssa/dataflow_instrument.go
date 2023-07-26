@@ -3,7 +3,6 @@ package ssa
 import (
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/types"
-	"cmd/internal/src"
 	"log"
 	"strings"
 )
@@ -52,33 +51,42 @@ func dataflowInstrument(f *Func) {
 			}
 		}
 	} else {
-		types.CalcSizeDisabled = false
 
 		log.Println("Cool!")
 		firstBlock := f.Blocks[0]
-		mem := firstBlock.Values[0]
+		// mem := firstBlock.Values[0]
 		sp := firstBlock.Values[1]
 		initialValues := firstBlock.Values[:]
-
-		lastValId := initialValues[len(initialValues)-1].ID
 
 		// Create array to hold the dataflow values
 		intType := types.Types[types.TINT]
 		int32Type := types.Types[types.TINT32]
-		arrayType := types.NewArray(intType, int64(lastValId))
-		types.CalcSize(arrayType)
-
-		arr1 := firstBlock.NewValue2(src.NoXPos, OpLocalAddr,
-			types.NewPtr(arrayType), sp, mem)
-		zero1 := firstBlock.NewValue2I(src.NoXPos, OpZero, types.TypeMem, arrayType.Size(), arr1, mem)
-		zero1.Aux = arrayType
-
-		lastMem := zero1
-		// lastMemReturnIdx := int64(0)
 
 		argNameStrToDfIdx := make(map[string]int32)
 
-		types.CalcSizeDisabled = true
+		// Search for dataflow array name
+		var dfArrName *ir.Name
+		var dfArrType *types.Type
+		var lastMem *Value
+		for vidx := 0; vidx < len(initialValues); vidx++ {
+			currentVal := initialValues[vidx]
+			if currentVal.Op == OpLocalAddr {
+				valName, ok := currentVal.Aux.(*ir.Name)
+				if ok {
+					if valName.Sym().Name == "__dataflow_arr" {
+						dfArrName = valName
+						dfArrType = valName.Type()
+
+						// This is the zeroing of the array
+						lastMem = initialValues[vidx+1]
+						break
+					}
+				}
+			}
+		}
+		if dfArrName == nil {
+			log.Fatalln("__dataflow_arr not found at function start")
+		}
 
 		// Walk through the value and propagate dataflow based on their parameters
 		for vidx := 0; vidx < len(initialValues); vidx++ {
@@ -99,9 +107,9 @@ func dataflowInstrument(f *Func) {
 					origArgName := strings.Trim(argNameStr, "_df_")
 					origArgID := argNameStrToDfIdx[origArgName]
 
-					dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-						types.NewPtr(arrayType), sp, lastMem)
-					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+					dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+						types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 						dfArr, f.ConstInt32(int32Type, origArgID))
 					lastMem = firstBlock.NewValue3A(valuePos, OpStore, types.TypeMem, intType,
 						argDfPtr, currentVal, lastMem)
@@ -121,9 +129,9 @@ func dataflowInstrument(f *Func) {
 				resDf := make([]*Value, numPrevRealArgs)
 				for argidx := 0; argidx < numPrevRealArgs; argidx++ {
 					arg1 := currentVal.Args[argidx]
-					dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-						types.NewPtr(arrayType), sp, lastMem)
-					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+					dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+						types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 						dfArr, f.ConstInt32(int32Type, int32(arg1.ID)))
 					resDf[argidx] = firstBlock.NewValue2(valuePos, OpLoad, intType, argDfPtr, lastMem)
 				}
@@ -149,9 +157,9 @@ func dataflowInstrument(f *Func) {
 				argDf := make([]*Value, numRealArgs)
 				for argidx := int64(0); argidx < numRealArgs; argidx++ {
 					arg1 := currentVal.Args[argidx]
-					dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-						types.NewPtr(arrayType), sp, lastMem)
-					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+					dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+						types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 						dfArr, f.ConstInt32(int32Type, int32(arg1.ID)))
 					argDf[argidx] = firstBlock.NewValue2(valuePos, OpLoad, intType, argDfPtr, lastMem)
 				}
@@ -203,9 +211,9 @@ func dataflowInstrument(f *Func) {
 				for retidx, retVal := range realReturnValues {
 					dfVal := dfValues[retidx]
 
-					dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-						types.NewPtr(arrayType), sp, lastMem)
-					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+					dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+						types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+					argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 						dfArr, f.ConstInt32(int32Type, int32(retVal.ID)))
 					lastMem = firstBlock.NewValue3A(valuePos, OpStore, types.TypeMem, intType,
 						argDfPtr, dfVal, lastMem)
@@ -222,9 +230,9 @@ func dataflowInstrument(f *Func) {
 			// Statically allocate an array to fit them on the stack
 			var argsDf [5]*Value
 			for argidx := 0; argidx < len(currentVal.Args); argidx++ {
-				dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-					types.NewPtr(arrayType), sp, lastMem)
-				argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+				dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+					types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+				argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 					dfArr, f.ConstInt32(int32Type, int32(currentVal.Args[argidx].ID)))
 				argsDf[argidx] = firstBlock.NewValue2(valuePos, OpLoad, intType, argDfPtr, lastMem)
 			}
@@ -237,9 +245,9 @@ func dataflowInstrument(f *Func) {
 			}
 
 			// Store back the dataflow bitmap
-			dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
-				types.NewPtr(arrayType), sp, lastMem)
-			argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
+			dfArr := firstBlock.NewValue2A(valuePos, OpLocalAddr,
+				types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+			argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 				dfArr, f.ConstInt32(int32Type, int32(currentVal.ID)))
 			lastMem = firstBlock.NewValue3A(valuePos, OpStore, types.TypeMem, intType,
 				argDfPtr, firstArg, lastMem)

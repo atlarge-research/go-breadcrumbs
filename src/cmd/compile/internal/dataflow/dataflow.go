@@ -3,7 +3,9 @@ package dataflow
 import (
 	"bufio"
 	"cmd/compile/internal/ir"
+	"cmd/compile/internal/typecheck"
 	"cmd/compile/internal/types"
+	"cmd/internal/src"
 	"log"
 	"os"
 )
@@ -38,7 +40,7 @@ func instrument(fn *ir.Func) {
 			Name: "_df_" + prevSym.Name,
 			Pkg:  prevSym.Pkg,
 		}
-		newName := ir.NewDeclNameAt(prevField.Pos, ir.ONAME, newSym)
+		newName := ir.NewNameAt(prevField.Pos, newSym)
 		newName.Class = ir.PPARAM
 		newName.Curfn = prevField.Nname.(*ir.Name).Curfn
 		newName.SetType(intType)
@@ -67,7 +69,7 @@ func instrument(fn *ir.Func) {
 			Name: "_df_" + prevSym.Name,
 			Pkg:  prevSym.Pkg,
 		}
-		newName := ir.NewDeclNameAt(prevResField.Pos, ir.ONAME, newSym)
+		newName := ir.NewNameAt(prevResField.Pos, newSym)
 		newName.Class = ir.PPARAM
 		newName.Curfn = prevResField.Nname.(*ir.Name).Curfn
 		newName.SetType(intType)
@@ -85,11 +87,13 @@ func instrument(fn *ir.Func) {
 	// Receive params dataflow from caller
 	fn.Dcl = append(fn.Dcl, paramsDf...)
 
-	f, _ := os.Create("humm_ast.dump")
-	defer f.Close()
-	w := bufio.NewWriter(f)
-	ir.FDumpList(w, "cool", fn.Body)
-	w.Flush()
+	if fn.Nname.Sym().Name == "boom" {
+		file, _ := os.Create("boom_ast.dump")
+		defer file.Close()
+		w := bufio.NewWriter(file)
+		ir.FDumpList(w, "cool", fn.Body)
+		w.Flush()
+	}
 
 	for _, n := range fn.Body {
 		if n.Op() == ir.ORETURN {
@@ -99,4 +103,22 @@ func instrument(fn *ir.Func) {
 			n.Results = append(n.Results, resultsDf...)
 		}
 	}
+
+	arrayType := types.NewArray(intType, int64(len(fn.Body)*5))
+	types.CalcSize(arrayType)
+
+	newSym := &types.Sym{
+		Name: "__dataflow_arr",
+		Pkg:  fn.Sym().Pkg,
+	}
+	newName := ir.NewNameAt(src.NoXPos, newSym)
+	newName.Class = ir.PAUTO
+	newName.Curfn = fn
+	newName.SetType(arrayType)
+	newName.SetUsed(true)
+
+	fn.Dcl = append(fn.Dcl, newName)
+
+	as := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, newName, nil))
+	fn.Body.Prepend(as)
 }
