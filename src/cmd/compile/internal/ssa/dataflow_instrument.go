@@ -10,43 +10,45 @@ import (
 
 func dataflowInstrument(f *Func) {
 	if !f.Dataflow {
-		firstBlock := f.Blocks[0]
-		initialValues := firstBlock.Values[:]
+		for bidx := 0; bidx < len(f.Blocks); bidx++ {
+			currentBlock := f.Blocks[bidx]
+			initialValues := currentBlock.Values[:]
 
-		for vi := 0; vi < len(initialValues); vi++ {
-			currentVal := initialValues[vi]
+			for vidx := 0; vidx < len(initialValues); vidx++ {
+				currentVal := initialValues[vidx]
 
-			// Need to shim function calls from
-			// non-dataflow code to dataflow code
-			if currentVal.Op == OpStaticLECall {
-				// No need to change type for this.
-				// Type was obtained automatically after
-				// func signature modification
+				// Need to shim function calls from
+				// non-dataflow code to dataflow code
+				if currentVal.Op == OpStaticLECall {
+					// No need to change type for this.
+					// Type was obtained automatically after
+					// func signature modification
 
-				auxCall := currentVal.Aux.(*AuxCall)
-				// For some calls, auxCall is nil, figure out why
-				if auxCall == nil || !auxCall.Dataflow {
+					auxCall := currentVal.Aux.(*AuxCall)
+					// For some calls, auxCall is nil, figure out why
+					if auxCall == nil || !auxCall.Dataflow {
+						continue
+					}
+
+					numRealArgs := int64(len(currentVal.Args) - 1)
+					// len-1 because last arg is memory location
+					argDf := make([]*Value, numRealArgs)
+					for argidx := int64(0); argidx < numRealArgs; argidx++ {
+						argDf[argidx] = f.ConstInt32(types.Types[types.TINT32], 0)
+					}
+
+					realArgs := make([]*Value, numRealArgs)
+					lastMem := currentVal.Args[numRealArgs]
+					copy(realArgs, currentVal.Args[:numRealArgs])
+					currentVal.resetArgs()
+					currentVal.AddArgs(realArgs...)
+					currentVal.AddArgs(argDf...)
+					currentVal.AddArgs(lastMem)
+
+					// NO NEED TO DEAL WITH RETURNS
+
 					continue
 				}
-
-				numRealArgs := int64(len(currentVal.Args) - 1)
-				// len-1 because last arg is memory location
-				argDf := make([]*Value, numRealArgs)
-				for argidx := int64(0); argidx < numRealArgs; argidx++ {
-					argDf[argidx] = f.ConstInt32(types.Types[types.TINT32], 0)
-				}
-
-				realArgs := make([]*Value, numRealArgs)
-				lastMem := currentVal.Args[numRealArgs]
-				copy(realArgs, currentVal.Args[:numRealArgs])
-				currentVal.resetArgs()
-				currentVal.AddArgs(realArgs...)
-				currentVal.AddArgs(argDf...)
-				currentVal.AddArgs(lastMem)
-
-				// NO NEED TO DEAL WITH RETURNS
-
-				continue
 			}
 		}
 	} else {
@@ -79,8 +81,8 @@ func dataflowInstrument(f *Func) {
 		types.CalcSizeDisabled = true
 
 		// Walk through the value and propagate dataflow based on their parameters
-		for vi := 0; vi < len(initialValues); vi++ {
-			currentVal := initialValues[vi]
+		for vidx := 0; vidx < len(initialValues); vidx++ {
+			currentVal := initialValues[vidx]
 			valuePos := currentVal.Pos
 
 			if currentVal.Op == OpArg {
@@ -170,7 +172,7 @@ func dataflowInstrument(f *Func) {
 				// Process return values
 				realReturnValues := make([]*Value, numRealResults)
 				retidx := 1
-				nextVal := initialValues[vi+retidx]
+				nextVal := initialValues[vidx+retidx]
 				for nextVal.Op == OpSelectN {
 					if nextVal.Type == types.TypeMem {
 						// The correct memory location in the return
@@ -185,9 +187,9 @@ func dataflowInstrument(f *Func) {
 					}
 
 					retidx++
-					nextVal = initialValues[vi+retidx]
+					nextVal = initialValues[vidx+retidx]
 				}
-				vi = vi + retidx - 1
+				vidx = vidx + retidx - 1
 				// The -1 is necessary as the coutner will be incremented at the end of loop
 
 				dfValues := make([]*Value, numRealResults)
@@ -219,19 +221,19 @@ func dataflowInstrument(f *Func) {
 			// There don't seem to be any Values with more than 4 arguments.
 			// Statically allocate an array to fit them on the stack
 			var argsDf [5]*Value
-			for ai := 0; ai < len(currentVal.Args); ai++ {
+			for argidx := 0; argidx < len(currentVal.Args); argidx++ {
 				dfArr := firstBlock.NewValue2(valuePos, OpLocalAddr,
 					types.NewPtr(arrayType), sp, lastMem)
 				argDfPtr := firstBlock.NewValue2(valuePos, OpPtrIndex, arrayType,
-					dfArr, f.ConstInt32(int32Type, int32(currentVal.Args[ai].ID)))
-				argsDf[ai] = firstBlock.NewValue2(valuePos, OpLoad, intType, argDfPtr, lastMem)
+					dfArr, f.ConstInt32(int32Type, int32(currentVal.Args[argidx].ID)))
+				argsDf[argidx] = firstBlock.NewValue2(valuePos, OpLoad, intType, argDfPtr, lastMem)
 			}
 
 			// Bitwise or two dataflow bitmaps at a time
 			firstArg := argsDf[0]
-			for ai := 1; ai < len(currentVal.Args); ai++ {
+			for argidx := 1; argidx < len(currentVal.Args); argidx++ {
 				firstArg = firstBlock.NewValue2(valuePos, OpOr64, intType,
-					firstArg, argsDf[ai])
+					firstArg, argsDf[argidx])
 			}
 
 			// Store back the dataflow bitmap

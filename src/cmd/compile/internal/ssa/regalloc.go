@@ -121,6 +121,7 @@ import (
 	"cmd/internal/sys"
 	"fmt"
 	"internal/buildcfg"
+	"log"
 	"math/bits"
 	"unsafe"
 )
@@ -2619,6 +2620,9 @@ func (s *regAllocState) computeLive() {
 						continue
 					}
 					desired.clobber(j.regs)
+					if len(v.Args) <= j.idx {
+						log.Println("I need this")
+					}
 					desired.add(v.Args[j.idx].ID, pickReg(j.regs))
 				}
 				// Set desired register of input 0 if this is a 2-operand instruction.
