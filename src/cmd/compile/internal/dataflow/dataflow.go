@@ -104,7 +104,16 @@ func instrument(fn *ir.Func) {
 		}
 	}
 
-	arrayType := types.NewArray(intType, int64(len(fn.Body)*5))
+	totalNodes := 0
+	for _, n := range fn.Body {
+		totalNodes += 1
+		ir.DoChildren(n, func(_ ir.Node) bool {
+			totalNodes += 1
+			return true
+		})
+	}
+
+	arrayType := types.NewArray(intType, int64(totalNodes*4))
 	types.CalcSize(arrayType)
 
 	newSym := &types.Sym{
