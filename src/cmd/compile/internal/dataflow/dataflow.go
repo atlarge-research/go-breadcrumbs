@@ -23,7 +23,7 @@ func Funcs(all []ir.Node) {
 }
 
 func instrument(fn *ir.Func) {
-	intType := types.Types[types.TINT]
+	dfBmType := types.Types[types.TINT64]
 
 	ft := fn.Type().FuncType()
 	// The results type needs to be a struct according to newsignature in types/.type.go
@@ -43,9 +43,9 @@ func instrument(fn *ir.Func) {
 		newName := ir.NewNameAt(prevField.Pos, newSym)
 		newName.Class = ir.PPARAM
 		newName.Curfn = prevField.Nname.(*ir.Name).Curfn
-		newName.SetType(intType)
+		newName.SetType(dfBmType)
 
-		newField := types.NewField(prevField.Pos, newSym, intType)
+		newField := types.NewField(prevField.Pos, newSym, dfBmType)
 		newField.Nname = newName
 
 		newParamsFields[i+prevParamsSize] = newField
@@ -72,9 +72,9 @@ func instrument(fn *ir.Func) {
 		newName := ir.NewNameAt(prevResField.Pos, newSym)
 		newName.Class = ir.PPARAM
 		newName.Curfn = prevResField.Nname.(*ir.Name).Curfn
-		newName.SetType(intType)
+		newName.SetType(dfBmType)
 
-		newField := types.NewField(prevResField.Pos, newSym, intType)
+		newField := types.NewField(prevResField.Pos, newSym, dfBmType)
 		newField.Nname = newName
 
 		newResultsFields[i+prevResultsSize] = newField
@@ -109,25 +109,40 @@ func instrument(fn *ir.Func) {
 		totalNodes += 1
 		ir.DoChildren(n, func(_ ir.Node) bool {
 			totalNodes += 1
-			return true
+			return false
 		})
 	}
 
-	arrayType := types.NewArray(intType, int64(totalNodes*4))
-	types.CalcSize(arrayType)
+	dfArrayType := types.NewArray(dfBmType, int64(totalNodes*3))
+	types.CalcSize(dfArrayType)
 
-	newSym := &types.Sym{
+	dfArrSym := &types.Sym{
 		Name: "__dataflow_arr",
 		Pkg:  fn.Sym().Pkg,
 	}
-	newName := ir.NewNameAt(src.NoXPos, newSym)
-	newName.Class = ir.PAUTO
-	newName.Curfn = fn
-	newName.SetType(arrayType)
-	newName.SetUsed(true)
+	dfArrName := ir.NewNameAt(src.NoXPos, dfArrSym)
+	dfArrName.Class = ir.PAUTO
+	dfArrName.Curfn = fn
+	dfArrName.SetType(dfArrayType)
+	dfArrName.SetUsed(true)
 
-	fn.Dcl = append(fn.Dcl, newName)
+	blockArrayType := types.NewArray(dfBmType, int64(totalNodes))
+	types.CalcSize(blockArrayType)
 
-	as := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, newName, nil))
-	fn.Body.Prepend(as)
+	blockDfSym := &types.Sym{
+		Name: "__blockdf_arr",
+		Pkg:  fn.Sym().Pkg,
+	}
+	blockDfName := ir.NewNameAt(src.NoXPos, blockDfSym)
+	blockDfName.Class = ir.PAUTO
+	blockDfName.Curfn = fn
+	blockDfName.SetType(blockArrayType)
+	blockDfName.SetUsed(true)
+
+	fn.Dcl = append(fn.Dcl, dfArrName)
+	fn.Dcl = append(fn.Dcl, blockDfName)
+
+	as1 := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, dfArrName, nil))
+	as2 := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, blockDfName, nil))
+	fn.Body.Prepend(as1, as2)
 }
