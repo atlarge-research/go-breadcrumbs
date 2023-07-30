@@ -9,6 +9,10 @@ import (
 )
 
 func dataflowInstrument(f *Func) {
+	if strings.HasPrefix(f.Name, "runtime.Df") {
+		log.Println("Yippeee!!")
+	}
+
 	if !f.Dataflow {
 		for bidx := 0; bidx < len(f.Blocks); bidx++ {
 			currentBlock := f.Blocks[bidx]
@@ -257,6 +261,71 @@ func dataflowInstrument(f *Func) {
 				}
 
 				if currentVal.Op == OpStaticLECall {
+
+					auxCall := currentVal.Aux.(*AuxCall)
+
+					if auxCall == nil {
+						continue
+					}
+
+					log.Println(auxCall.Fn.Name)
+					if strings.HasPrefix(auxCall.Fn.Name, "runtime.DfMark") {
+						// reset the mem value of this static call
+						numRealArgs := len(currentVal.Args) - 1
+						realArgs := make([]*Value, numRealArgs)
+						copy(realArgs, currentVal.Args[:numRealArgs])
+						currentVal.resetArgs()
+						currentVal.AddArgs(realArgs...)
+						currentVal.AddArgs(lastMem)
+
+						retidx := 1
+						nextVal := initialValues[vidx+retidx]
+						var markerIdx, retVal *Value // Index of bit to set in the bitmap
+						for nextVal.Op == OpSelectN {
+							if nextVal.Type == types.TypeMem {
+								lastMem = nextVal
+							} else if nextVal.AuxInt == 0 {
+								// That's the second return value
+								retVal = nextVal
+							} else if nextVal.AuxInt == 1 {
+								// That's the second return value
+								markerIdx = nextVal
+							}
+
+							retidx++
+							nextVal = initialValues[vidx+retidx]
+						}
+						vidx = vidx + retidx - 1
+
+						if retVal == nil {
+							log.Fatalln("First return value from DfMark is not used")
+						}
+
+						if markerIdx == nil {
+							markerIdx = currentBlock.NewValue1I(valuePos, OpSelectN, dfBmType,
+								1, currentVal)
+						}
+
+						dfVal := currentBlock.NewValue2(valuePos, OpLsh64x64, dfBmType,
+							f.ConstInt64(dfBmType, int64(1)), markerIdx)
+
+						// Store the dataflow bitmap
+						dfArr := currentBlock.NewValue2A(valuePos, OpLocalAddr,
+							types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+						argDfPtr := currentBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
+							dfArr, f.ConstInt32(int32Type, int32(retVal.ID)))
+						lastMem = currentBlock.NewValue3A(valuePos, OpStore, types.TypeMem, dfBmType,
+							argDfPtr, dfVal, lastMem)
+
+						continue
+					}
+
+					// For call from dataflow to non dataflow functions
+					// Don't do anything
+					if !auxCall.Dataflow {
+						continue
+					}
+
 					// No need to change type for this.
 					// Type was obtained automatically after
 					// func signature modification
