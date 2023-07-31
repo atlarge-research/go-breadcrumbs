@@ -17,6 +17,8 @@ func Funcs(all []ir.Node) {
 			if n.Pragma&ir.Dataflow != 0 {
 				log.Println("Phew!")
 				instrument(n)
+			} else {
+				log.Println("Not df " + n.Nname.Sym().Name)
 			}
 		}
 	}

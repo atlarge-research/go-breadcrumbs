@@ -9,8 +9,8 @@ import (
 )
 
 func dataflowInstrument(f *Func) {
-	if strings.HasPrefix(f.Name, "runtime.Df") {
-		log.Println("Yippeee!!")
+	if strings.HasPrefix(f.Name, "DfMark") {
+		log.Println("Yippeee!! " + f.Name)
 	}
 
 	if !f.Dataflow {
@@ -57,7 +57,7 @@ func dataflowInstrument(f *Func) {
 		}
 	} else {
 
-		log.Println("Cool!")
+		log.Println("Cool! " + f.Name)
 		firstBlock := f.Blocks[0]
 		// mem := firstBlock.Values[0]
 		sp := firstBlock.Values[1]
@@ -268,7 +268,7 @@ func dataflowInstrument(f *Func) {
 						continue
 					}
 
-					log.Println(auxCall.Fn.Name)
+					log.Println("dumpty " + auxCall.Fn.Name)
 					if strings.HasPrefix(auxCall.Fn.Name, "runtime.DfMark") {
 						// reset the mem value of this static call
 						numRealArgs := len(currentVal.Args) - 1
@@ -285,7 +285,7 @@ func dataflowInstrument(f *Func) {
 							if nextVal.Type == types.TypeMem {
 								lastMem = nextVal
 							} else if nextVal.AuxInt == 0 {
-								// That's the second return value
+								// That's the first return value
 								retVal = nextVal
 							} else if nextVal.AuxInt == 1 {
 								// That's the second return value
@@ -310,12 +310,60 @@ func dataflowInstrument(f *Func) {
 							f.ConstInt64(dfBmType, int64(1)), markerIdx)
 
 						// Store the dataflow bitmap
+						// Set the bitmap for both the passed in argument and return
+						// There were problems with propagation when the argument and return are only
+						// operated on by constant values
+						arg1 := realArgs[1] // The first arg is a dict, that exists for generic function calls
 						dfArr := currentBlock.NewValue2A(valuePos, OpLocalAddr,
 							types.NewPtr(dfArrType), dfArrName, sp, lastMem)
 						argDfPtr := currentBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
+							dfArr, f.ConstInt32(int32Type, int32(arg1.ID)))
+						lastMem = currentBlock.NewValue3A(valuePos, OpStore, types.TypeMem, dfBmType,
+							argDfPtr, dfVal, lastMem)
+
+						dfArr = currentBlock.NewValue2A(valuePos, OpLocalAddr,
+							types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+						argDfPtr = currentBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
 							dfArr, f.ConstInt32(int32Type, int32(retVal.ID)))
 						lastMem = currentBlock.NewValue3A(valuePos, OpStore, types.TypeMem, dfBmType,
 							argDfPtr, dfVal, lastMem)
+
+						continue
+					} else if strings.HasPrefix(auxCall.Fn.Name, "runtime.DfInspect") {
+						// reset the mem value of this static call
+						numRealArgs := len(currentVal.Args) - 1
+						realArgs := make([]*Value, numRealArgs)
+						copy(realArgs, currentVal.Args[:numRealArgs])
+						currentVal.resetArgs()
+						currentVal.AddArgs(realArgs...)
+						currentVal.AddArgs(lastMem)
+
+						// Replace the first return by the dataflow value of the first Arg
+						retidx := 1
+						nextVal := initialValues[vidx+retidx]
+						var retVal *Value // Index of bit to set in the bitmap
+						for nextVal.Op == OpSelectN {
+							if nextVal.Type == types.TypeMem {
+								lastMem = nextVal
+							} else if nextVal.AuxInt == 0 {
+								// That's the first return value
+								retVal = nextVal
+							}
+
+							retidx++
+							nextVal = initialValues[vidx+retidx]
+						}
+						vidx = vidx + retidx - 1
+
+						arg1 := realArgs[1] // The first arg is a dict, that exists for generic function calls
+						dfArr := currentBlock.NewValue2A(valuePos, OpLocalAddr,
+							types.NewPtr(dfArrType), dfArrName, sp, lastMem)
+						argDfPtr := currentBlock.NewValue2(valuePos, OpPtrIndex, dfArrType,
+							dfArr, f.ConstInt32(int32Type, int32(arg1.ID)))
+						// argDf[argidx] = currentBlock.NewValue2(valuePos, OpLoad, dfBmType, argDfPtr, lastMem)
+						// Basically replace a return with the above load
+						retVal.reset(OpLoad)
+						retVal.AddArgs(argDfPtr, lastMem)
 
 						continue
 					}
