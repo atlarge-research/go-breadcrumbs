@@ -505,6 +505,9 @@ type Field struct {
 	// or interface Type.  Exception: if field is function receiver, arg or
 	// result, then this is BOGUS_FUNARG_OFFSET; types does not know the Abi.
 	Offset int64
+
+	// Index of field in struct
+	Idx int64
 }
 
 const (

@@ -448,6 +448,44 @@ func dataflowInstrument(f *Func) {
 					continue
 				}
 
+				if currentVal.Op == OpLocalAddr ||
+					currentVal.Op == OpOffPtr {
+					continue
+				}
+
+				if currentVal.Op == OpZero {
+					zeroType := currentVal.Aux.(*types.Type)
+					// Specifically for struct types, allocate additional
+					// memory for dataflow propagation
+					if zeroType != nil && zeroType.IsStruct() &&
+						!zeroType.IsFuncArgStruct() {
+						numFields := zeroType.NumComponents(true)
+						additionalMem := numFields * dfBmType.Size()
+
+						currentVal.AuxInt = currentVal.AuxInt + additionalMem
+					}
+				}
+
+				if currentVal.Op == OpLoad {
+					localAddr := initialValues[vidx-2]
+					ptr := initialValues[vidx-1]
+
+					// (* Value).copyInto doesn't work when Value has mem args
+					newLocalAddr := currentBlock.NewValue0(currentVal.Pos, localAddr.Op, localAddr.Type)
+					newLocalAddr.Aux = localAddr.Aux
+					newLocalAddr.AuxInt = localAddr.AuxInt
+					newLocalAddr.AddArgs(localAddr.Args...)
+
+					newPtr := currentBlock.NewValue0(currentVal.Pos, ptr.Op, types.NewPtr(dfBmType))
+					newPtr.AddArgs(newLocalAddr)
+
+					structName := localAddr.Aux.(*ir.Name)
+					structType := structName.Type()
+
+					baseSize := structType.Size()
+					newPtr.AuxInt = baseSize + auxToInt64(ptr.Aux)*dfBmType.Size()
+				}
+
 				// TODO: Need to handle stores (OpStore) separately.
 				// Pass dataflow through the stored data
 				if currentVal.Type.IsMemory() {

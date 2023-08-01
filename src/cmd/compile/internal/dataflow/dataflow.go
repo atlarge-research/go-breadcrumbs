@@ -18,7 +18,7 @@ func Funcs(all []ir.Node) {
 				log.Println("Phew!")
 				instrument(n)
 			} else {
-				log.Println("Not df " + n.Nname.Sym().Name)
+				// log.Println("Not df " + n.Nname.Sym().Name)
 			}
 		}
 	}

@@ -1059,6 +1059,10 @@ func (s *state) newValue1I(op ssa.Op, t *types.Type, aux int64, arg *ssa.Value) 
 	return s.curBlock.NewValue1I(s.peekPos(), op, t, aux, arg)
 }
 
+func (s *state) newValue1IA(op ssa.Op, t *types.Type, auxint int64, aux ssa.Aux, arg *ssa.Value) *ssa.Value {
+	return s.curBlock.NewValue1IA(s.peekPos(), op, t, auxint, aux, arg)
+}
+
 // newValue2 adds a new value with two arguments to the current block.
 func (s *state) newValue2(op ssa.Op, t *types.Type, arg0, arg1 *ssa.Value) *ssa.Value {
 	return s.curBlock.NewValue2(s.peekPos(), op, t, arg0, arg1)
@@ -5376,11 +5380,11 @@ func (s *state) addr(n ir.Node) *ssa.Value {
 	case ir.ODOT:
 		n := n.(*ir.SelectorExpr)
 		p := s.addr(n.X)
-		return s.newValue1I(ssa.OpOffPtr, t, n.Offset(), p)
+		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.Idx), p)
 	case ir.ODOTPTR:
 		n := n.(*ir.SelectorExpr)
 		p := s.exprPtr(n.X, n.Bounded(), n.Pos())
-		return s.newValue1I(ssa.OpOffPtr, t, n.Offset(), p)
+		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.Idx), p)
 	case ir.OCONVNOP:
 		n := n.(*ir.ConvExpr)
 		if n.Type() == n.X.Type() {

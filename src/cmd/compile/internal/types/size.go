@@ -176,7 +176,7 @@ func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
 		maxalign = 8
 	}
 	lastzero := int64(0)
-	for _, f := range t.Fields().Slice() {
+	for idx, f := range t.Fields().Slice() {
 		if f.Type == nil {
 			// broken field, just skip it so that other valid fields
 			// get a width.
@@ -199,6 +199,7 @@ func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
 		}
 		if isStruct { // For receiver/args/results, do not set, it depends on ABI
 			f.Offset = o
+			f.Idx = int64(idx)
 		}
 
 		w := f.Type.width

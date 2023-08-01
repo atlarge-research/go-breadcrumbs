@@ -734,8 +734,15 @@ type stringAux string
 
 func (stringAux) CanBeAnSSAAux() {}
 
+type int64Aux int64
+
+func (int64Aux) CanBeAnSSAAux() {}
+
 func auxToString(i Aux) string {
 	return string(i.(stringAux))
+}
+func auxToInt64(i Aux) int64 {
+	return int64(i.(int64Aux))
 }
 func auxToSym(i Aux) Sym {
 	// TODO: kind of a hack - allows nil interface through
@@ -757,6 +764,9 @@ func auxToS390xRotateParams(i Aux) s390x.RotateParams {
 
 func StringToAux(s string) Aux {
 	return stringAux(s)
+}
+func Int64ToAux(i int64) Aux {
+	return int64Aux(i)
 }
 func symToAux(s Sym) Aux {
 	return s
