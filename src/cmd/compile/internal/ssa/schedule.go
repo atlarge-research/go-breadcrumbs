@@ -7,6 +7,7 @@ package ssa
 import (
 	"cmd/compile/internal/types"
 	"container/heap"
+	"log"
 	"sort"
 )
 
@@ -409,6 +410,9 @@ func storeOrder(values []*Value, sset *sparseSet, storeNumber []int32) []*Value 
 			stores = append(stores, v)
 			if v.Op == OpInitMem || v.Op == OpPhi {
 				continue
+			}
+			if v.MemoryArg() == nil {
+				log.Println("Dammit")
 			}
 			sset.add(v.MemoryArg().ID) // record that v's memory arg is used
 		}

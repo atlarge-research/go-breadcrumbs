@@ -1,13 +1,11 @@
 package dataflow
 
 import (
-	"bufio"
 	"cmd/compile/internal/ir"
 	"cmd/compile/internal/typecheck"
 	"cmd/compile/internal/types"
 	"cmd/internal/src"
 	"log"
-	"os"
 )
 
 func Funcs(all []ir.Node) {
@@ -61,7 +59,8 @@ func instrument(fn *ir.Func) {
 	prevResultsFields := ft.Results.FieldSlice()
 	prevResultsSize := len(prevResultsFields)
 	newResultsFields := make([]*types.Field, 2*prevResultsSize)
-	resultsDf := make([]ir.Node, prevResultsSize)
+	resultsDf := make([]*ir.Name, prevResultsSize)
+	resultsDfNode := make([]ir.Node, prevResultsSize)
 	for i := 0; i < prevResultsSize; i++ {
 		prevResField := prevResultsFields[i]
 		newResultsFields[i] = prevResField
@@ -72,7 +71,7 @@ func instrument(fn *ir.Func) {
 			Pkg:  prevSym.Pkg,
 		}
 		newName := ir.NewNameAt(prevResField.Pos, newSym)
-		newName.Class = ir.PPARAM
+		newName.Class = ir.PPARAMOUT
 		newName.Curfn = prevResField.Nname.(*ir.Name).Curfn
 		newName.SetType(dfBmType)
 
@@ -81,6 +80,7 @@ func instrument(fn *ir.Func) {
 
 		newResultsFields[i+prevResultsSize] = newField
 		resultsDf[i] = newName
+		resultsDfNode[i] = newName
 	}
 	newResultsStruct := types.NewStruct(types.NoPkg, newResultsFields)
 	newResultsStruct.StructType().Funarg = ft.Results.StructType().Funarg
@@ -88,21 +88,22 @@ func instrument(fn *ir.Func) {
 
 	// Receive params dataflow from caller
 	fn.Dcl = append(fn.Dcl, paramsDf...)
+	fn.Dcl = append(fn.Dcl, resultsDf...)
 
-	if fn.Nname.Sym().Name == "boom" {
-		file, _ := os.Create("boom_ast.dump")
-		defer file.Close()
-		w := bufio.NewWriter(file)
-		ir.FDumpList(w, "cool", fn.Body)
-		w.Flush()
-	}
+	// if fn.Nname.Sym().Name == "boom" {
+	// 	file, _ := os.Create("boom_ast.dump")
+	// 	defer file.Close()
+	// 	w := bufio.NewWriter(file)
+	// 	ir.FDumpList(w, "cool", fn.Body)
+	// 	w.Flush()
+	// }
 
 	for _, n := range fn.Body {
 		if n.Op() == ir.ORETURN {
 			n := n.(*ir.ReturnStmt)
 
 			// Send back dataflow of return values to caller
-			n.Results = append(n.Results, resultsDf...)
+			n.Results = append(n.Results, resultsDfNode...)
 		}
 	}
 
