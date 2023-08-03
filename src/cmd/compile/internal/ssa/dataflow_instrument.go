@@ -27,6 +27,7 @@ type dfInstrumentState struct {
 	blockDfType *types.Type
 
 	argNameStrToDfIdx map[string]int32
+	varNameToDfMap    map[string]*Value
 }
 
 func (d *dfInstrumentState) init() {
@@ -36,6 +37,7 @@ func (d *dfInstrumentState) init() {
 	firstBlock := d.f.Blocks[0]
 	d.sp = firstBlock.Values[1]
 	d.argNameStrToDfIdx = make(map[string]int32)
+	d.varNameToDfMap = make(map[string]*Value)
 }
 
 func (d *dfInstrumentState) findDfArrays() {
@@ -545,8 +547,42 @@ func (d *dfInstrumentState) zeroMem(currentVal *Value) {
 
 func (d *dfInstrumentState) loadStore(currentVal *Value, vidx int) {
 	valPos := currentVal.Pos
-	ptr := currentVal.Args[0]
-	localAddr := ptr.Args[0]
+	location := currentVal.Args[0]
+
+	if location.Op == OpLocalAddr {
+		// Read from a variable when running the compiler without optimizations
+		varName := location.Aux.(*ir.Name).Sym().Name
+
+		if currentVal.Op == OpLoad {
+			fieldDf := d.varNameToDfMap[varName]
+			combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+				d.currentBlockDf, fieldDf)
+
+			dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+				types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
+			argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
+				dfArr, d.f.ConstInt32(int32Type, int32(currentVal.ID)))
+			d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
+				argDfPtr, combinedDf, d.lastMem)
+		} else {
+			d.lastMem = currentVal
+			storeDataArg := currentVal.Args[1]
+
+			dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+				types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
+			argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
+				dfArr, d.f.ConstInt32(int32Type, int32(storeDataArg.ID)))
+			fieldDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
+			combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+				d.currentBlockDf, fieldDf)
+
+			d.varNameToDfMap[varName] = combinedDf
+		}
+
+		return
+	}
+
+	localAddr := location.Args[0]
 
 	// (* Value).copyInto doesn't work when Value has mem args
 	newLocalAddr := d.currentBlock.NewValue0(valPos, localAddr.Op, localAddr.Type)
@@ -555,13 +591,13 @@ func (d *dfInstrumentState) loadStore(currentVal *Value, vidx int) {
 	newLocalAddr.AddArgs(localAddr.Args[:len(localAddr.Args)-1]...)
 	newLocalAddr.AddArgs(d.lastMem)
 
-	fieldDfPtr := d.currentBlock.NewValue0(valPos, ptr.Op, types.NewPtr(dfBmType))
+	fieldDfPtr := d.currentBlock.NewValue0(valPos, location.Op, types.NewPtr(dfBmType))
 	fieldDfPtr.AddArgs(newLocalAddr)
 
 	structName := localAddr.Aux.(*ir.Name)
 	structType := structName.Type()
 	baseSize := structType.Size()
-	fieldDfPtr.AuxInt = baseSize + auxToInt64(ptr.Aux)*dfBmType.Size()
+	fieldDfPtr.AuxInt = baseSize + auxToInt64(location.Aux)*dfBmType.Size()
 
 	prevArgs := make([]*Value, len(currentVal.Args))
 	copy(prevArgs, currentVal.Args)
@@ -605,22 +641,24 @@ func (d *dfInstrumentState) loadStore(currentVal *Value, vidx int) {
 func (d *dfInstrumentState) propagateDfFromArgs(currentVal *Value) {
 	valPos := currentVal.Pos
 
-	// There don't seem to be any Values with more than 4 arguments.
-	// Statically allocate an array to fit them on the stack
-	var argsDf [5]*Value
-	for argidx, currentarg := range currentVal.Args {
+	argsDf := make([]*Value, 0, len(currentVal.Args))
+	for _, currentarg := range currentVal.Args {
+		if currentarg.Type.IsMemory() {
+			// No need to propagate dataflow of memory args
+			continue
+		}
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
 			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
 		argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
 			dfArr, d.f.ConstInt32(int32Type, int32(currentarg.ID)))
-		argsDf[argidx] = d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
+		argsDf = append(argsDf, d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem))
 	}
 
 	// Bitwise or two dataflow bitmaps at a time
 	firstArg := d.currentBlockDf
-	for argidx := 0; argidx < len(currentVal.Args); argidx++ {
+	for _, argDf := range argsDf {
 		firstArg = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-			firstArg, argsDf[argidx])
+			firstArg, argDf)
 	}
 
 	// Store back the dataflow bitmap
