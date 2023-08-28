@@ -21,13 +21,16 @@ type dfInstrumentState struct {
 	currentBlockDf *Value
 	initialValues  []*Value
 
-	dfArrName   *ir.Name
-	dfArrType   *types.Type
-	blockDfName *ir.Name
-	blockDfType *types.Type
+	dfArrName     *ir.Name
+	dfArrType     *types.Type
+	blockDfName   *ir.Name
+	blockDfType   *types.Type
+	blockDfZeroId ID
 
 	argNameStrToDfIdx map[string]int32
-	varNameToDfMap    map[string]*Value
+	nameToDfPtr       map[string]*Value
+	ptrToDfArrIdx     map[ID]addrIndexPair
+	// varNameToDfMap    map[string]*Value
 }
 
 func (d *dfInstrumentState) init() {
@@ -37,7 +40,8 @@ func (d *dfInstrumentState) init() {
 	firstBlock := d.f.Blocks[0]
 	d.sp = firstBlock.Values[1]
 	d.argNameStrToDfIdx = make(map[string]int32)
-	d.varNameToDfMap = make(map[string]*Value)
+	d.nameToDfPtr = make(map[string]*Value)
+	d.ptrToDfArrIdx = make(map[ID]addrIndexPair)
 }
 
 func (d *dfInstrumentState) findDfArrays() {
@@ -58,10 +62,13 @@ func (d *dfInstrumentState) findDfArrays() {
 					// d.lastMem = fbInitialValues[vidx+1]
 
 					// Next val after the zero should be the block dataflow array
-					d.blockDfName = fbInitialValues[vidx+2].Aux.(*ir.Name)
+					blockDfVal := fbInitialValues[vidx+2]
+					d.blockDfName = blockDfVal.Aux.(*ir.Name)
 					d.blockDfType = d.blockDfName.Type()
 
-					d.lastMem = fbInitialValues[vidx+3]
+					blockDfZero := fbInitialValues[vidx+3]
+					d.blockDfZeroId = blockDfZero.ID
+					d.lastMem = blockDfZero
 
 					break
 				}
@@ -150,7 +157,7 @@ func (d *dfInstrumentState) visitBlocks() {
 			predsDf[predidx] = currentBlock.NewValue2(src.NoXPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
 		}
 		// Bitwise or two dataflow bitmaps at a time
-		currentBlockDf := d.f.ConstInt64(int32Type, int64(0)) // Default to 0 if block has no predecessors
+		currentBlockDf := d.f.ConstInt64(dfBmType, int64(0)) // Default to 0 if block has no predecessors
 		for predidx := 0; predidx < len(currentBlock.Preds); predidx++ {
 			currentBlockDf = currentBlock.NewValue2(src.NoXPos, OpOr64, dfBmType,
 				currentBlockDf, predsDf[predidx])
@@ -201,17 +208,27 @@ func (d *dfInstrumentState) visitBlocks() {
 	// Actually populate the values now that we know the last mem of all blocks
 	for _, currentBlock := range d.f.Blocks {
 		for _, currentVal := range currentBlock.Values {
-			if (currentVal.Op == OpPhi || currentVal.Op == OpCopy) && currentVal.Type.IsMemory() {
-				for _, pred := range currentBlock.Preds {
-					predBlock := pred.Block()
-					currentVal.AddArg(lastMemOfBlock[predBlock])
+			if currentVal.Op == OpPhi || currentVal.Op == OpCopy {
+				if currentVal.Type.IsMemory() {
+					for _, pred := range currentBlock.Preds {
+						predBlock := pred.Block()
+						currentVal.AddArg(lastMemOfBlock[predBlock])
+					}
+				} else if currentVal.Type.IsPtr() {
+					// Deal with the df index of pointers
+					dfIdx := d.ptrToDfArrIdx[currentVal.ID].Idx
+					for _, arg1 := range currentVal.Args {
+						dfIdx.AddArg(d.ptrToDfArrIdx[arg1.ID].Idx)
+					}
 				}
-				break
 			}
 		}
 	}
 }
 
+// This modifies tha values in the block, a lot
+// Should only be called once per block
+// Functions used in this should only be called from here
 func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 	for vidx := 0; vidx < len(d.initialValues); vidx++ {
 		currentVal := d.initialValues[vidx]
@@ -219,6 +236,14 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 		if currentVal.Op == OpArg {
 			d.extractDfOfArg(currentVal)
 
+			continue
+		}
+
+		if currentVal.ID <= d.blockDfZeroId {
+			// Don't propagate dataflow for __dataflow_ar and _blockdf_arr
+			// This needs be here after arg
+			// Args are present before array definition, but dataflow still needs to
+			// be propagated for them
 			continue
 		}
 
@@ -258,10 +283,22 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			continue
 		}
 
-		if currentVal.Op == OpLocalAddr ||
-			currentVal.Op == OpOffPtr {
+		if currentVal.Op == OpSelectN {
+			continue
+		}
 
-			// We deal with them in the Zero/Load/Store that follows
+		if currentVal.Op == OpLocalAddr ||
+			currentVal.Op == OpOffPtr ||
+			currentVal.Op == OpPtrIndex ||
+			(currentVal.Op == OpPhi && currentVal.Type.IsPtr()) ||
+			(currentVal.Op == OpCopy && currentVal.Type.IsPtr()) {
+
+			// Deal with OpCopy and OpPhi at the end of the block
+
+			// Arg and SelectN of pointers should be evaluated in arg and static call
+
+			// Compute array indices based on this address/pointer instruction
+			d.computeDfIndex(currentVal)
 			continue
 		}
 
@@ -271,12 +308,33 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 		}
 
 		if currentVal.Op == OpLoad || currentVal.Op == OpStore {
-			d.loadStore(currentVal, vidx)
+			d.loadStore(currentVal)
 
 			continue
 		}
 
+		// // Dummy to bypass loadstore instrumentation for testing
+		// if currentVal.Op == OpLoad {
+		// 	numRealArgs := len(currentVal.Args) - 1
+		// 	realArgs := make([]*Value, numRealArgs)
+		// 	copy(realArgs, currentVal.Args[:numRealArgs])
+		// 	currentVal.resetArgs()
+		// 	currentVal.AddArgs(realArgs...)
+		// 	currentVal.AddArgs(d.lastMem)
+
+		// 	continue
+		// }
+
 		if currentVal.Type.IsMemory() {
+			// For example, OpPanicBounds is rewritten here
+
+			numRealArgs := len(currentVal.Args) - 1
+			realArgs := make([]*Value, numRealArgs)
+			copy(realArgs, currentVal.Args[:numRealArgs])
+			currentVal.resetArgs()
+			currentVal.AddArgs(realArgs...)
+			currentVal.AddArgs(d.lastMem)
+
 			d.lastMem = currentVal
 		}
 
@@ -292,10 +350,12 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 	argSym := argName.Sym()
 	argNameStr := argSym.Name
 
-	if !strings.HasPrefix(argNameStr, "_df_") {
+	if !strings.HasPrefix(argNameStr, "_df_") &&
+		!strings.HasPrefix(argNameStr, "_dfptr_") {
+
 		// normal arg
 		d.argNameStrToDfIdx[argNameStr] = int32(currentVal.ID)
-	} else {
+	} else if strings.HasPrefix(argNameStr, "_df_") {
 		// Dataflow arg
 		// Normal always comes first and the map is populated
 		origArgName := strings.Trim(argNameStr, "_df_")
@@ -307,16 +367,35 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 			dfArr, d.f.ConstInt32(int32Type, origArgID))
 		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
 			argDfPtr, currentVal, d.lastMem)
+	} else {
+		// Pointer to dataflow
+		origArgName := strings.Trim(argNameStr, "_dfptr_")
+		origArgID := ID(d.argNameStrToDfIdx[origArgName])
+
+		d.nameToDfPtr[origArgName] = currentVal
+		d.ptrToDfArrIdx[origArgID] = addrIndexPair{Addr: currentVal, Idx: d.f.ConstInt32(int32Type, 0)}
 	}
+}
+
+func (d *dfInstrumentState) createNewLocalAddr(valPos src.XPos, localAddr *Value) *Value {
+	if localAddr.Op == OpLocalAddr {
+		newLocalAddr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+			localAddr.Type, localAddr.Aux, localAddr.Args[0], d.lastMem)
+
+		return newLocalAddr
+	}
+
+	return localAddr
 }
 
 func (d *dfInstrumentState) addDfToReturn(currentVal *Value) (makeResultValue *Value) {
 	valPos := currentVal.Pos
 	numPrevRealArgs := (len(currentVal.Args) - 1) / 2
 	// len-1 because last arg is memory location
-	resDf := make([]*Value, numPrevRealArgs)
+	resDf := make([]*Value, 0, numPrevRealArgs)
 	for argidx := 0; argidx < numPrevRealArgs; argidx++ {
 		arg1 := currentVal.Args[argidx]
+
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
 			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
 		argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
@@ -324,7 +403,19 @@ func (d *dfInstrumentState) addDfToReturn(currentVal *Value) (makeResultValue *V
 		retvalDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
 		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
 			d.currentBlockDf, retvalDf)
-		resDf[argidx] = combinedDf
+		resDf = append(resDf, combinedDf)
+
+		if arg1.Type.IsPtr() {
+			dfAddrIdx := d.ptrToDfArrIdx[arg1.ID]
+			dfAddr := d.createNewLocalAddr(valPos, dfAddrIdx.Addr)
+			dfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, dfBmType.PtrTo(),
+				dfAddr, dfAddrIdx.Idx)
+			resDf = append(resDf, dfPtr)
+		} else {
+			// Return nil ptr for non ptr values
+			nilVal := d.currentBlock.NewValue0(valPos, OpConstNil, dfBmType.PtrTo())
+			resDf = append(resDf, nilVal)
+		}
 	}
 
 	prevRealArgs := make([]*Value, numPrevRealArgs)
@@ -332,6 +423,7 @@ func (d *dfInstrumentState) addDfToReturn(currentVal *Value) (makeResultValue *V
 	currentVal.resetArgs()
 	currentVal.AddArgs(prevRealArgs...)
 	currentVal.AddArgs(resDf...)
+	currentVal.AddArgs(d.currentBlockDf)
 	// currentVal.AddArgs(lastMem) // We do this at the end of the block
 	// After the block df has been recorded
 	// Take care to pass the mem parameter from new zero/alloc/store instructions
@@ -456,9 +548,10 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 
 	numRealArgs := int64(len(currentVal.Args) - 1)
 	// len-1 because last arg is memory location
-	argDf := make([]*Value, numRealArgs)
+	argDf := make([]*Value, 0, numRealArgs)
 	for argidx := int64(0); argidx < numRealArgs; argidx++ {
 		arg1 := currentVal.Args[argidx]
+
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
 			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
 		argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
@@ -466,7 +559,15 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 		paramDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
 		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
 			d.currentBlockDf, paramDf)
-		argDf[argidx] = combinedDf
+		argDf = append(argDf, combinedDf)
+
+		if arg1.Type.IsPtr() {
+			dfAddrIdx := d.ptrToDfArrIdx[arg1.ID]
+			dfAddr := d.createNewLocalAddr(valPos, dfAddrIdx.Addr)
+			dfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, dfBmType.PtrTo(),
+				dfAddr, dfAddrIdx.Idx)
+			argDf = append(argDf, dfPtr)
+		}
 	}
 
 	realArgs := make([]*Value, numRealArgs)
@@ -474,13 +575,15 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	currentVal.resetArgs()
 	currentVal.AddArgs(realArgs...)
 	currentVal.AddArgs(argDf...)
+	currentVal.AddArgs(d.currentBlockDf)
 	currentVal.AddArgs(d.lastMem)
 
 	d.lastMem = currentVal
 
 	resultsType := currentVal.Type
 	numResults := resultsType.NumFields()
-	numRealResults := int64((numResults - 1) / 2)
+	// -2 = -1 for mem, another -1 for block df
+	numRealResults := (numResults - 2) / 3
 
 	// Process return values
 	realReturnValues := make([]*Value, numRealResults)
@@ -495,7 +598,8 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 			// Store these returns in the map
 			// For later stores to the df array
 			// -1 because we start with 1
-			// Another -1 because of mem type return
+			// Need to store based on AuxInt, multiple returns with the same AuxInt
+			// have occurred
 			realReturnValues[nextVal.AuxInt] = nextVal
 		}
 
@@ -505,19 +609,31 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	vidx = vidx + retidx - 1
 	// The -1 is necessary as the coutner will be incremented at the end of loop
 
-	dfValues := make([]*Value, numRealResults)
-	for retidx, retVal := range realReturnValues {
+	dfValues := make([]*Value, 0, numResults)
+	for _, retVal := range realReturnValues {
+		if retVal == nil {
+			// Actual program did not use this return
+			continue
+		}
 		// Use currentVal here as that is the function call
 		retvalDf := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
-			retVal.AuxInt+numRealResults, currentVal)
+			numRealResults+(2*retVal.AuxInt), currentVal)
 		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
 			d.currentBlockDf, retvalDf)
-		argDf[retidx] = combinedDf
+		dfValues = append(dfValues, combinedDf)
+
+		if retVal.Type.IsPtr() {
+			dfPtr := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(),
+				numRealResults+(2*retVal.AuxInt)+1, currentVal)
+			dfValues = append(dfValues, dfPtr)
+		} else {
+			dfValues = append(dfValues, nil)
+		}
 	}
 
 	// After accepting all returns, store the df values to the dataflow array
 	for retidx, retVal := range realReturnValues {
-		dfVal := dfValues[retidx]
+		dfVal := dfValues[retidx*2]
 
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
 			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
@@ -525,90 +641,167 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 			dfArr, d.f.ConstInt32(int32Type, int32(retVal.ID)))
 		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
 			argDfPtr, dfVal, d.lastMem)
+
+		if retVal.Type.IsPtr() {
+			dfPtr := dfValues[(retidx*2)+1]
+
+			// Selects don't have an Aux to pull the name from
+			// Maybe this will never be necessary. Fingers crossed
+			// retName := retVal.Aux.(*ir.Name)
+			// retSym := retName.Sym()
+			// retNameStr := retSym.Name
+			// d.nameToDfPtr[retNameStr] = dfVal
+			d.ptrToDfArrIdx[retVal.ID] = addrIndexPair{Addr: dfPtr, Idx: d.f.ConstInt32(int32Type, 0)}
+		}
 	}
 
 	return vidx
 }
 
 func (d *dfInstrumentState) zeroMem(currentVal *Value) {
-	zeroType := currentVal.Aux.(*types.Type)
-	// Specifically for struct types, allocate additional
-	// memory for dataflow propagation
-	if zeroType != nil && zeroType.IsStruct() &&
-		!zeroType.IsFuncArgStruct() {
-		numFields := zeroType.NumComponents(true)
-		additionalMem := numFields * dfBmType.Size()
-
-		currentVal.AuxInt = currentVal.AuxInt + additionalMem
-	}
-
+	prevArg1 := currentVal.Args[0]
+	// Need to do this as mem value could have changed in the meantime
+	currentVal.SetArgs2(prevArg1, d.lastMem)
 	d.lastMem = currentVal
-}
 
-func (d *dfInstrumentState) loadStore(currentVal *Value, vidx int) {
-	valPos := currentVal.Pos
-	location := currentVal.Args[0]
+	zeroType := currentVal.Aux.(*types.Type)
 
-	if location.Op == OpLocalAddr {
-		// Read from a variable when running the compiler without optimizations
-		varName := location.Aux.(*ir.Name).Sym().Name
-
-		if currentVal.Op == OpLoad {
-			fieldDf := d.varNameToDfMap[varName]
-			combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-				d.currentBlockDf, fieldDf)
-
-			dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
-				types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
-			argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
-				dfArr, d.f.ConstInt32(int32Type, int32(currentVal.ID)))
-			d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
-				argDfPtr, combinedDf, d.lastMem)
-		} else {
-			d.lastMem = currentVal
-			storeDataArg := currentVal.Args[1]
-
-			dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
-				types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
-			argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
-				dfArr, d.f.ConstInt32(int32Type, int32(storeDataArg.ID)))
-			fieldDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
-			combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-				d.currentBlockDf, fieldDf)
-
-			d.varNameToDfMap[varName] = combinedDf
-		}
-
+	if zeroType == nil {
 		return
 	}
 
-	localAddr := location.Args[0]
+	// Specifically for struct and array types, allocate additional
+	// memory for dataflow propagation
+	if (zeroType.IsStruct() &&
+		!zeroType.IsFuncArgStruct()) ||
+		zeroType.IsArray() {
 
-	// (* Value).copyInto doesn't work when Value has mem args
-	newLocalAddr := d.currentBlock.NewValue0(valPos, localAddr.Op, localAddr.Type)
-	newLocalAddr.Aux = localAddr.Aux
-	newLocalAddr.AuxInt = localAddr.AuxInt
-	newLocalAddr.AddArgs(localAddr.Args[:len(localAddr.Args)-1]...)
-	newLocalAddr.AddArgs(d.lastMem)
+		valPos := currentVal.Pos
+		numFields := zeroType.NumComponents(true)
+		additionalMem := numFields * dfBmType.Size()
 
-	fieldDfPtr := d.currentBlock.NewValue0(valPos, location.Op, types.NewPtr(dfBmType))
-	fieldDfPtr.AddArgs(newLocalAddr)
+		ogSize := currentVal.AuxInt
+		currentVal.AuxInt = currentVal.AuxInt + additionalMem
 
-	structName := localAddr.Aux.(*ir.Name)
-	structType := structName.Type()
-	baseSize := structType.Size()
-	fieldDfPtr.AuxInt = baseSize + auxToInt64(location.Aux)*dfBmType.Size()
+		// Initialize the dataflow values to the current block df
+		localAddr := currentVal.Args[0]
+		for fidx := int64(0); fidx < numFields; fidx++ {
+			dfIdx := d.f.ConstInt32(int32Type, int32(ogSize+fidx*dfBmType.Size()))
+			dfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, types.NewPtr(dfBmType), localAddr, dfIdx)
+			d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
+				dfPtr, d.currentBlockDf, d.lastMem)
+		}
+	}
+}
 
-	prevArgs := make([]*Value, len(currentVal.Args))
-	copy(prevArgs, currentVal.Args)
-	currentVal.resetArgs()
-	currentVal.AddArgs(prevArgs[:len(prevArgs)-1]...)
-	currentVal.AddArgs(d.lastMem)
+type addrIndexPair struct {
+	Addr *Value
+	Idx  *Value
+}
+
+func (d *dfInstrumentState) computeDfIndex(currentVal *Value) {
+	if currentVal.Op == OpLocalAddr {
+		prevArg1 := currentVal.Args[0]
+		// Need to do this as mem value could have changed in the meantime
+		currentVal.SetArgs2(prevArg1, d.lastMem)
+
+		valName := currentVal.Aux.(*ir.Name)
+		valSym := valName.Sym()
+		valNameStr := valSym.Name
+		d.nameToDfPtr[valNameStr] = currentVal
+		d.ptrToDfArrIdx[currentVal.ID] = addrIndexPair{Addr: currentVal, Idx: d.f.ConstInt32(int32Type, 0)}
+		return
+	} else if currentVal.Op == OpCopy || currentVal.Op == OpPhi {
+		prevPtr := currentVal.Args[0]
+		prevPtrAddrIdx := d.ptrToDfArrIdx[prevPtr.ID]
+		d.ptrToDfArrIdx[currentVal.ID] = addrIndexPair{
+			Addr: prevPtrAddrIdx.Addr, // SKETCHY: we assume both values come from the same addr. That's sketchy
+			Idx:  d.currentBlock.NewValue0(currentVal.Pos, currentVal.Op, int32Type),
+		}
+		return
+	}
+
+	valPos := currentVal.Pos
+	prevPtr := currentVal.Args[0]
+
+	prevPtrAddrIdx := d.ptrToDfArrIdx[prevPtr.ID]
+	dfAddr := d.createNewLocalAddr(valPos, prevPtrAddrIdx.Addr)
+
+	elemType := currentVal.Type.Elem()
+	dfByteIdx := prevPtrAddrIdx.Idx
+	if currentVal.Op == OpOffPtr { // For struct elements
+		staticIndex := d.f.ConstInt32(int32Type, int32(elemType.NumComponents(true)*auxToInt64(currentVal.Aux)*dfBmType.Size()))
+		dfByteIdx = d.currentBlock.NewValue2(valPos, OpAdd32, int32Type, dfByteIdx, staticIndex)
+	} else if currentVal.Op == OpPtrIndex { // For array elements
+		arrIndex := currentVal.Args[1]
+		// Below is basically index in array * number of components of array elem * size of df type
+		dynamicIndex := d.currentBlock.NewValue2(valPos, OpMul32, int32Type, arrIndex, d.f.ConstInt32(int32Type, int32(elemType.NumComponents(true))))
+		dynamicIndex = d.currentBlock.NewValue2(valPos, OpMul32, int32Type, dynamicIndex, d.f.ConstInt32(int32Type, int32(dfBmType.Size())))
+		dfByteIdx = d.currentBlock.NewValue2(valPos, OpAdd32, int32Type, dfByteIdx, dynamicIndex)
+	}
+
+	d.ptrToDfArrIdx[currentVal.ID] = addrIndexPair{Addr: dfAddr, Idx: dfByteIdx}
+}
+
+func (d *dfInstrumentState) loadStore(currentVal *Value) {
+	valPos := currentVal.Pos
+
+	var combinedDf *Value
+	var scalarDfPtr *Value
+	ptrVal := currentVal.Args[0]
+
+	if ptrVal.Op == OpOffPtr ||
+		ptrVal.Op == OpPtrIndex ||
+		ptrVal.Op == OpCopy ||
+		ptrVal.Op == OpPhi {
+
+		ptrVal := currentVal.Args[0]
+		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
+		ptrDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
+			dfArr, d.f.ConstInt32(int32Type, int32(ptrVal.ID)))
+		ptrDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, ptrDfPtr, d.lastMem)
+
+		// Load dataflow of the embedded field
+		scalarDfInfo := d.ptrToDfArrIdx[ptrVal.ID]
+		scalarDfArr := d.createNewLocalAddr(valPos, scalarDfInfo.Addr)
+		scalarDfIdx := scalarDfInfo.Idx
+		scalarDfPtr = d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
+			scalarDfArr, scalarDfIdx)
+		scalarDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, scalarDfPtr, d.lastMem)
+
+		// Combine ptr and embedded field df
+		fieldDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType, ptrDf, scalarDf)
+
+		// Combine field and block df
+		combinedDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+			d.currentBlockDf, fieldDf)
+
+	} else {
+		// Probably localaddr, arg, selectN (return)
+		// No need to chase pointer
+
+		// var scalarDfAddr *Value
+		if ptrVal.Aux != nil {
+			addrName := ptrVal.Aux.(*ir.Name)
+			addrSym := addrName.Sym()
+			addrNameStr := addrSym.Name
+
+			scalarDfRawAddr := d.nameToDfPtr[addrNameStr]
+			scalarDfPtr = d.createNewLocalAddr(valPos, scalarDfRawAddr)
+		} else {
+			scalarDfPtr = ptrVal
+		}
+		scalarDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, scalarDfPtr, d.lastMem)
+
+		combinedDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+			d.currentBlockDf, scalarDf)
+	}
 
 	if currentVal.Op == OpLoad {
-		fieldDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, fieldDfPtr, d.lastMem)
-		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-			d.currentBlockDf, fieldDf)
+		prevArg1 := currentVal.Args[0]
+		// Need to do this as mem value could have changed in the meantime
+		currentVal.SetArgs2(prevArg1, d.lastMem)
 
 		// Now store this dataflow to the array position of the Load statement
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
@@ -621,20 +814,25 @@ func (d *dfInstrumentState) loadStore(currentVal *Value, vidx int) {
 		// This can only be OpStore
 		// Propagate value from df array to the struct's df space
 
+		prevArg1 := currentVal.Args[0]
+		prevArg2 := currentVal.Args[1]
+		// Need to do this as mem value could have changed in the meantime
+		currentVal.SetArgs3(prevArg1, prevArg2, d.lastMem)
+
 		d.lastMem = currentVal
 
-		storeDataArg := currentVal.Args[1]
+		dataToStore := currentVal.Args[1]
 
 		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
 			types.NewPtr(d.dfArrType), d.dfArrName, d.sp, d.lastMem)
 		argDfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, d.dfArrType,
-			dfArr, d.f.ConstInt32(int32Type, int32(storeDataArg.ID)))
+			dfArr, d.f.ConstInt32(int32Type, int32(dataToStore.ID)))
 		fieldDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
-		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-			d.currentBlockDf, fieldDf)
+		combinedDf2 := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+			combinedDf, fieldDf)
 
 		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
-			fieldDfPtr, combinedDf, d.lastMem)
+			scalarDfPtr, combinedDf2, d.lastMem)
 	}
 }
 
@@ -700,7 +898,7 @@ func dataflowInstrument(f *Func) {
 					// len-1 because last arg is memory location
 					argDf := make([]*Value, numRealArgs)
 					for argidx := int64(0); argidx < numRealArgs; argidx++ {
-						argDf[argidx] = f.ConstInt64(types.Types[types.TINT64], 0)
+						argDf[argidx] = f.ConstInt64(dfBmType, 0)
 					}
 
 					realArgs := make([]*Value, numRealArgs)

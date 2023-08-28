@@ -26,14 +26,15 @@ func instrument(fn *ir.Func) {
 	dfBmType := types.Types[types.TINT64]
 
 	ft := fn.Type().FuncType()
-	// The results type needs to be a struct according to newsignature in types/.type.go
+	// The parameters type needs to be a struct according to newsignature in types/.type.go
 	prevParamsFields := ft.Params.FieldSlice()
 	prevParamsSize := len(prevParamsFields)
-	newParamsFields := make([]*types.Field, 2*prevParamsSize)
-	paramsDf := make([]*ir.Name, prevParamsSize)
+	newParamsFields := make([]*types.Field, 0, 2*prevParamsSize)
+	paramsDf := make([]*ir.Name, 0, prevParamsSize)
+	// Param order is value, [dfptr], df, blockdf
 	for i := 0; i < prevParamsSize; i++ {
 		prevField := prevParamsFields[i]
-		newParamsFields[i] = prevField
+		newParamsFields = append(newParamsFields, prevField)
 
 		prevSym := prevField.Sym
 		newSym := &types.Sym{
@@ -48,9 +49,42 @@ func instrument(fn *ir.Func) {
 		newField := types.NewField(prevField.Pos, newSym, dfBmType)
 		newField.Nname = newName
 
-		newParamsFields[i+prevParamsSize] = newField
-		paramsDf[i] = newName
+		newParamsFields = append(newParamsFields, newField)
+		paramsDf = append(paramsDf, newName)
+
+		if prevField.Type.IsPtr() {
+			newSym := &types.Sym{
+				Name: "_dfptr_" + prevSym.Name,
+				Pkg:  prevSym.Pkg,
+			}
+			newName := ir.NewNameAt(prevField.Pos, newSym)
+			newName.Class = ir.PPARAM
+			newName.Curfn = prevField.Nname.(*ir.Name).Curfn
+			newName.SetType(dfBmType.PtrTo())
+
+			newField := types.NewField(prevField.Pos, newSym, dfBmType.PtrTo())
+			newField.Nname = newName
+
+			newParamsFields = append(newParamsFields, newField)
+			paramsDf = append(paramsDf, newName)
+		}
 	}
+	// Pass block df as the last df parameter
+	newSym := &types.Sym{
+		Name: "_dfblock_",
+		Pkg:  fn.Sym().Pkg,
+	}
+	newName := ir.NewNameAt(fn.Pos(), newSym)
+	newName.Class = ir.PPARAM
+	newName.Curfn = fn
+	newName.SetType(dfBmType)
+
+	newField := types.NewField(fn.Pos(), newSym, dfBmType)
+	newField.Nname = newName
+
+	newParamsFields = append(newParamsFields, newField)
+	paramsDf = append(paramsDf, newName)
+
 	newParamsStruct := types.NewStruct(types.NoPkg, newParamsFields)
 	newParamsStruct.StructType().Funarg = ft.Params.StructType().Funarg
 	ft.Params = newParamsStruct
@@ -58,12 +92,13 @@ func instrument(fn *ir.Func) {
 	// The results type needs to be a struct according to newsignature in types/.type.go
 	prevResultsFields := ft.Results.FieldSlice()
 	prevResultsSize := len(prevResultsFields)
-	newResultsFields := make([]*types.Field, 2*prevResultsSize)
-	resultsDf := make([]*ir.Name, prevResultsSize)
-	resultsDfNode := make([]ir.Node, prevResultsSize)
+	newResultsFields := make([]*types.Field, 0, 2*prevResultsSize)
+	resultsDf := make([]*ir.Name, 0, prevResultsSize)
+	resultsDfNode := make([]ir.Node, 0, prevResultsSize)
+	// Return order is value, [dfptr], df, blockdf
 	for i := 0; i < prevResultsSize; i++ {
 		prevResField := prevResultsFields[i]
-		newResultsFields[i] = prevResField
+		newResultsFields = append(newResultsFields, prevResField)
 
 		prevSym := prevResField.Sym
 		newSym := &types.Sym{
@@ -78,10 +113,46 @@ func instrument(fn *ir.Func) {
 		newField := types.NewField(prevResField.Pos, newSym, dfBmType)
 		newField.Nname = newName
 
-		newResultsFields[i+prevResultsSize] = newField
-		resultsDf[i] = newName
-		resultsDfNode[i] = newName
+		newResultsFields = append(newResultsFields, newField)
+		resultsDf = append(resultsDf, newName)
+		resultsDfNode = append(resultsDfNode, newName)
+
+		// Df ptrs are returned by default. They will be null for non ptr values
+		// if prevResField.Type.IsPtr() {
+		newSym = &types.Sym{
+			Name: "_dfptr_" + prevSym.Name,
+			Pkg:  prevSym.Pkg,
+		}
+		newName = ir.NewNameAt(prevResField.Pos, newSym)
+		newName.Class = ir.PPARAMOUT
+		newName.Curfn = prevResField.Nname.(*ir.Name).Curfn
+		newName.SetType(dfBmType.PtrTo())
+
+		newField = types.NewField(prevResField.Pos, newSym, dfBmType)
+		newField.Nname = newName
+
+		newResultsFields = append(newResultsFields, newField)
+		resultsDf = append(resultsDf, newName)
+		resultsDfNode = append(resultsDfNode, newName)
+		// }
 	}
+	// Return block df as the last df parameter
+	newSym = &types.Sym{
+		Name: "_dfblockret_",
+		Pkg:  fn.Sym().Pkg,
+	}
+	newName = ir.NewNameAt(fn.Pos(), newSym)
+	newName.Class = ir.PPARAM
+	newName.Curfn = fn
+	newName.SetType(dfBmType)
+
+	newField = types.NewField(fn.Pos(), newSym, dfBmType)
+	newField.Nname = newName
+
+	newResultsFields = append(newResultsFields, newField)
+	resultsDf = append(resultsDf, newName)
+	resultsDfNode = append(resultsDfNode, newName)
+
 	newResultsStruct := types.NewStruct(types.NoPkg, newResultsFields)
 	newResultsStruct.StructType().Funarg = ft.Results.StructType().Funarg
 	ft.Results = newResultsStruct
