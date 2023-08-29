@@ -81,39 +81,40 @@ func (d *dfInstrumentState) findDfArrays() {
 }
 
 func (d *dfInstrumentState) visitBlocks() {
-	blockQueue := make([]*Block, 0)
-	visitedBlock := make(map[*Block]bool)
+	// blockQueue := make([]*Block, 0)
+	// visitedBlock := make(map[*Block]bool)
 	lastMemOfBlock := make(map[*Block]*Value)
 
-	blockQueue = append(blockQueue, d.f.Blocks[0])
-	for len(blockQueue) != 0 {
-		currentBlock := blockQueue[0]
-		if visitedBlock[currentBlock] {
-			blockQueue = blockQueue[1:]
-			continue
-		}
-		visitedBlock[currentBlock] = true
-		blockQueue = blockQueue[1:]
+	// blockQueue = append(blockQueue, d.f.Blocks[0])
+	// for len(blockQueue) != 0 {
+	// 	currentBlock := blockQueue[0]
+	// 	if visitedBlock[currentBlock] {
+	// 		blockQueue = blockQueue[1:]
+	// 		continue
+	// 	}
+	// 	visitedBlock[currentBlock] = true
+	// 	blockQueue = blockQueue[1:]
 
-		// log.Println(currentBlock.ID)
-		// log.Println(currentBlock.Kind)
-		// log.Println(currentBlock.Controls)
+	// 	// log.Println(currentBlock.ID)
+	// 	// log.Println(currentBlock.Kind)
+	// 	// log.Println(currentBlock.Controls)
 
-		// Only add a block to queue if all its dependencies have been visited
-		// OLD: It's a topological sort to ensure all predecessor blocks have been processed
-		// and their memory values obtained before processing a block
-		// NEW: topological sort isn't necessary as we populate all Phis with lastMem
-		// after all blocks have been processed
-		for _, succ := range currentBlock.Succs {
-			blockQueue = append(blockQueue, succ.Block())
-		}
+	// 	// Only add a block to queue if all its dependencies have been visited
+	// 	// OLD: It's a topological sort to ensure all predecessor blocks have been processed
+	// 	// and their memory values obtained before processing a block
+	// 	// NEW: topological sort isn't necessary as we populate all Phis with lastMem
+	// 	// after all blocks have been processed
+	// 	for _, succ := range currentBlock.Succs {
+	// 		blockQueue = append(blockQueue, succ.Block())
+	// 	}
+	for _, currentBlock := range d.f.Blocks {
 
 		initialValues := currentBlock.Values[:]
 
 		// Check if mem Phi or Copy exist
 		// If not, create one
 		// IMPORTANT that this happens first
-		// POPULATES last mem
+		// POPULATES lastmem
 		if len(currentBlock.Preds) > 0 {
 			memPhiExists := false
 			for vidx := 0; vidx < len(initialValues); vidx++ {
@@ -123,11 +124,7 @@ func (d *dfInstrumentState) visitBlocks() {
 					// For phi value, we need to change the memory vars after dataflow analysis
 					currentVal.resetArgs()
 					// Actually populate the value later. Just make sure they exist for now
-					//
-					// for argsidx := 0; argsidx < len(currentBlock.Preds); argsidx++ {
-					// 	predBlock := currentBlock.Preds[argsidx].Block()
-					// 	currentVal.AddArg(lastMemOfBlock[predBlock])
-					// }
+
 					memPhiExists = true
 					d.lastMem = currentVal
 					break
@@ -139,10 +136,6 @@ func (d *dfInstrumentState) visitBlocks() {
 					opToUse = OpCopy
 				}
 				memPhi := currentBlock.NewValue0(src.NoXPos, opToUse, types.TypeMem)
-				// for argsidx := 0; argsidx < len(currentBlock.Preds); argsidx++ {
-				// 	predBlock := currentBlock.Preds[argsidx].Block()
-				// 	memPhi.AddArg(lastMemOfBlock[predBlock])
-				// }
 				d.lastMem = memPhi
 			}
 		}
@@ -237,6 +230,15 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			d.extractDfOfArg(currentVal)
 
 			continue
+		}
+
+		if currentVal.Op == OpConstNil {
+			// Df code needs to be generated even for nil pointers
+			// As nil ptr exceptions are only caught at runtime
+			d.ptrToDfArrIdx[currentVal.ID] = addrIndexPair{
+				Addr: nil,
+				Idx:  d.currentBlock.NewValue0(currentVal.Pos, OpConstNil, currentVal.Type.PtrTo()),
+			}
 		}
 
 		if currentVal.ID <= d.blockDfZeroId {
@@ -350,12 +352,7 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 	argSym := argName.Sym()
 	argNameStr := argSym.Name
 
-	if !strings.HasPrefix(argNameStr, "_df_") &&
-		!strings.HasPrefix(argNameStr, "_dfptr_") {
-
-		// normal arg
-		d.argNameStrToDfIdx[argNameStr] = int32(currentVal.ID)
-	} else if strings.HasPrefix(argNameStr, "_df_") {
+	if strings.HasPrefix(argNameStr, "_df_") {
 		// Dataflow arg
 		// Normal always comes first and the map is populated
 		origArgName := strings.Trim(argNameStr, "_df_")
@@ -367,13 +364,19 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 			dfArr, d.f.ConstInt32(int32Type, origArgID))
 		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
 			argDfPtr, currentVal, d.lastMem)
-	} else {
+	} else if strings.HasPrefix(argNameStr, "_dfptr_") {
 		// Pointer to dataflow
 		origArgName := strings.Trim(argNameStr, "_dfptr_")
 		origArgID := ID(d.argNameStrToDfIdx[origArgName])
 
 		d.nameToDfPtr[origArgName] = currentVal
 		d.ptrToDfArrIdx[origArgID] = addrIndexPair{Addr: currentVal, Idx: d.f.ConstInt32(int32Type, 0)}
+	} else if strings.HasPrefix(argNameStr, "_dfblock_") {
+		d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+			d.currentBlockDf, currentVal)
+	} else {
+		// normal arg
+		d.argNameStrToDfIdx[argNameStr] = int32(currentVal.ID)
 	}
 }
 
@@ -390,7 +393,7 @@ func (d *dfInstrumentState) createNewLocalAddr(valPos src.XPos, localAddr *Value
 
 func (d *dfInstrumentState) addDfToReturn(currentVal *Value) (makeResultValue *Value) {
 	valPos := currentVal.Pos
-	numPrevRealArgs := (len(currentVal.Args) - 1) / 2
+	numPrevRealArgs := (len(currentVal.Args) - 2) / 3
 	// len-1 because last arg is memory location
 	resDf := make([]*Value, 0, numPrevRealArgs)
 	for argidx := 0; argidx < numPrevRealArgs; argidx++ {
@@ -581,7 +584,7 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	d.lastMem = currentVal
 
 	resultsType := currentVal.Type
-	numResults := resultsType.NumFields()
+	numResults := int64(resultsType.NumFields())
 	// -2 = -1 for mem, another -1 for block df
 	numRealResults := (numResults - 2) / 3
 
@@ -607,7 +610,13 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 		nextVal = d.initialValues[vidx+retidx]
 	}
 	vidx = vidx + retidx - 1
-	// The -1 is necessary as the coutner will be incremented at the end of loop
+	// The -1 is necessary as the counter will be incremented at the end of loop
+
+	// Get block df from return
+	blockDfRet := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
+		numResults-2, currentVal)
+	d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+		d.currentBlockDf, blockDfRet)
 
 	dfValues := make([]*Value, 0, numResults)
 	for _, retVal := range realReturnValues {
