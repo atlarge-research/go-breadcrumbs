@@ -30,11 +30,10 @@ func instrument(fn *ir.Func) {
 	prevParamsFields := ft.Params.FieldSlice()
 	prevParamsSize := len(prevParamsFields)
 	newParamsFields := make([]*types.Field, 0, 2*prevParamsSize)
-	paramsDf := make([]*ir.Name, 0, prevParamsSize)
+	paramsDf := make([]*ir.Name, 0, 2*prevParamsSize)
 	// Param order is value, [dfptr], df, blockdf
 	for i := 0; i < prevParamsSize; i++ {
 		prevField := prevParamsFields[i]
-		newParamsFields = append(newParamsFields, prevField)
 
 		prevSym := prevField.Sym
 		newSym := &types.Sym{
@@ -85,7 +84,8 @@ func instrument(fn *ir.Func) {
 	newParamsFields = append(newParamsFields, newField)
 	paramsDf = append(paramsDf, newName)
 
-	newParamsStruct := types.NewStruct(types.NoPkg, newParamsFields)
+	allParamsFields := append(prevParamsFields, newParamsFields...)
+	newParamsStruct := types.NewStruct(types.NoPkg, allParamsFields)
 	newParamsStruct.StructType().Funarg = ft.Params.StructType().Funarg
 	ft.Params = newParamsStruct
 
@@ -93,12 +93,11 @@ func instrument(fn *ir.Func) {
 	prevResultsFields := ft.Results.FieldSlice()
 	prevResultsSize := len(prevResultsFields)
 	newResultsFields := make([]*types.Field, 0, 2*prevResultsSize)
-	resultsDf := make([]*ir.Name, 0, prevResultsSize)
-	resultsDfNode := make([]ir.Node, 0, prevResultsSize)
+	resultsDf := make([]*ir.Name, 0, 2*prevResultsSize)
+	resultsDfNode := make([]ir.Node, 0, 2*prevResultsSize)
 	// Return order is value, [dfptr], df, blockdf
 	for i := 0; i < prevResultsSize; i++ {
 		prevResField := prevResultsFields[i]
-		newResultsFields = append(newResultsFields, prevResField)
 
 		prevSym := prevResField.Sym
 		newSym := &types.Sym{
@@ -153,7 +152,8 @@ func instrument(fn *ir.Func) {
 	resultsDf = append(resultsDf, newName)
 	resultsDfNode = append(resultsDfNode, newName)
 
-	newResultsStruct := types.NewStruct(types.NoPkg, newResultsFields)
+	allResultsFields := append(prevResultsFields, newResultsFields...)
+	newResultsStruct := types.NewStruct(types.NoPkg, allResultsFields)
 	newResultsStruct.StructType().Funarg = ft.Results.StructType().Funarg
 	ft.Results = newResultsStruct
 
