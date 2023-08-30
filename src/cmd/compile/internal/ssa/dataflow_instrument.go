@@ -309,6 +309,11 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			continue
 		}
 
+		if currentVal.Op == OpMove {
+			d.moveMem(currentVal)
+			continue
+		}
+
 		if currentVal.Op == OpLoad || currentVal.Op == OpStore {
 			d.loadStore(currentVal)
 
@@ -394,7 +399,7 @@ func (d *dfInstrumentState) createNewLocalAddr(valPos src.XPos, localAddr *Value
 func (d *dfInstrumentState) addDfToReturn(currentVal *Value) (makeResultValue *Value) {
 	valPos := currentVal.Pos
 	numPrevRealArgs := (len(currentVal.Args) - 2) / 3
-	// len-1 because last arg is memory location
+	// len-2 because last args are blockdf and memory location
 	resDf := make([]*Value, 0, numPrevRealArgs)
 	for argidx := 0; argidx < numPrevRealArgs; argidx++ {
 		arg1 := currentVal.Args[argidx]
@@ -690,7 +695,7 @@ func (d *dfInstrumentState) zeroMem(currentVal *Value) {
 		additionalMem := numFields * dfBmType.Size()
 
 		ogSize := currentVal.AuxInt
-		currentVal.AuxInt = currentVal.AuxInt + additionalMem
+		currentVal.AuxInt = ogSize + additionalMem
 
 		// Initialize the dataflow values to the current block df
 		localAddr := currentVal.Args[0]
@@ -699,6 +704,45 @@ func (d *dfInstrumentState) zeroMem(currentVal *Value) {
 			dfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, types.NewPtr(dfBmType), localAddr, dfIdx)
 			d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
 				dfPtr, d.currentBlockDf, d.lastMem)
+		}
+	}
+}
+
+func (d *dfInstrumentState) moveMem(currentVal *Value) {
+	prevArg1 := currentVal.Args[0]
+	prevArg2 := currentVal.Args[1]
+	// Need to do this as mem value could have changed in the meantime
+	currentVal.SetArgs3(prevArg1, prevArg2, d.lastMem)
+	d.lastMem = currentVal
+
+	moveType := currentVal.Aux.(*types.Type)
+
+	if moveType == nil {
+		return
+	}
+
+	if (moveType.IsStruct() &&
+		!moveType.IsFuncArgStruct()) ||
+		moveType.IsArray() {
+
+		valPos := currentVal.Pos
+		numFields := moveType.NumComponents(true)
+		additionalMem := numFields * dfBmType.Size()
+
+		ogSize := currentVal.AuxInt
+		currentVal.AuxInt = ogSize + additionalMem
+
+		localAddr := currentVal.Args[0]
+		for fidx := int64(0); fidx < numFields; fidx++ {
+			dfIdx := d.f.ConstInt32(int32Type, int32(ogSize+fidx*dfBmType.Size()))
+			// load previous df
+			dfPtr := d.currentBlock.NewValue2(valPos, OpPtrIndex, types.NewPtr(dfBmType), localAddr, dfIdx)
+			// add current block df
+			prevDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, dfPtr, d.lastMem)
+			newDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType, prevDf, d.currentBlockDf)
+			// store back
+			d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
+				dfPtr, newDf, d.lastMem)
 		}
 	}
 }
