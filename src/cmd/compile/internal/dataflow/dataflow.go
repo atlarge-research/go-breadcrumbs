@@ -117,7 +117,6 @@ func instrument(fn *ir.Func) {
 		resultsDfNode = append(resultsDfNode, newName)
 
 		// Df ptrs are returned by default. They will be null for non ptr values
-		// if prevResField.Type.IsPtr() {
 		newSym = &types.Sym{
 			Name: "_dfptr_" + prevSym.Name,
 			Pkg:  prevSym.Pkg,
@@ -133,7 +132,6 @@ func instrument(fn *ir.Func) {
 		newResultsFields = append(newResultsFields, newField)
 		resultsDf = append(resultsDf, newName)
 		resultsDfNode = append(resultsDfNode, newName)
-		// }
 	}
 	// Return block df as the last df parameter
 	newSym = &types.Sym{
