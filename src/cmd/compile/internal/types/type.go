@@ -507,7 +507,7 @@ type Field struct {
 	Offset int64
 
 	// Index of field in struct
-	Idx int64
+	DfOffset int64
 }
 
 const (

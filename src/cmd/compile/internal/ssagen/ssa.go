@@ -5380,11 +5380,11 @@ func (s *state) addr(n ir.Node) *ssa.Value {
 	case ir.ODOT:
 		n := n.(*ir.SelectorExpr)
 		p := s.addr(n.X)
-		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.Idx), p)
+		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.DfOffset), p)
 	case ir.ODOTPTR:
 		n := n.(*ir.SelectorExpr)
 		p := s.exprPtr(n.X, n.Bounded(), n.Pos())
-		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.Idx), p)
+		return s.newValue1IA(ssa.OpOffPtr, t, n.Offset(), ssa.Int64ToAux(n.Selection.DfOffset), p)
 	case ir.OCONVNOP:
 		n := n.(*ir.ConvExpr)
 		if n.Type() == n.X.Type() {

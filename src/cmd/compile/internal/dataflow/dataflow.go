@@ -139,7 +139,7 @@ func instrument(fn *ir.Func) {
 		Pkg:  fn.Sym().Pkg,
 	}
 	newName = ir.NewNameAt(fn.Pos(), newSym)
-	newName.Class = ir.PPARAM
+	newName.Class = ir.PPARAMOUT
 	newName.Curfn = fn
 	newName.SetType(dfBmType)
 

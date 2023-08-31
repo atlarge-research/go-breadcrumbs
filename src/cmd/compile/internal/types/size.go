@@ -161,10 +161,12 @@ func expandiface(t *Type) {
 }
 
 func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
+	dfBmType := Types[TINT64]
 	// flag is 0 (receiver), 1 (actual struct), or RegSize (in/out parameters)
 	isStruct := flag == 1
 	starto := o
 	maxalign := int32(flag)
+	// maxalign := int32(8) // we use int64 for dataflow tracking, so max align is always 8
 	if maxalign < 1 {
 		maxalign = 1
 	}
@@ -175,8 +177,10 @@ func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
 	if isStruct && t.NumFields() == 0 && t.Sym() != nil && t.Sym().Name == "align64" && isAtomicStdPkg(t.Sym().Pkg) {
 		maxalign = 8
 	}
+
+	dfo := int64(0)
 	lastzero := int64(0)
-	for idx, f := range t.Fields().Slice() {
+	for _, f := range t.Fields().Slice() {
 		if f.Type == nil {
 			// broken field, just skip it so that other valid fields
 			// get a width.
@@ -199,7 +203,7 @@ func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
 		}
 		if isStruct { // For receiver/args/results, do not set, it depends on ABI
 			f.Offset = o
-			f.Idx = int64(idx)
+			f.DfOffset = dfo
 		}
 
 		w := f.Type.width
@@ -210,6 +214,7 @@ func calcStructOffset(errtype *Type, t *Type, o int64, flag int) int64 {
 			lastzero = o
 		}
 		o += w
+		dfo += f.Type.NumComponents(true) * dfBmType.width
 		maxwidth := MaxWidth
 		// On 32-bit systems, reflect tables impose an additional constraint
 		// that each field start offset must fit in 31 bits.
