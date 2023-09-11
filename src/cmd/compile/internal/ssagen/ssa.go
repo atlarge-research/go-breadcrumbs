@@ -3133,7 +3133,7 @@ func (s *state) exprCheckPtr(n ir.Node, checkPtrOK bool) *ssa.Value {
 	case ir.ODOTPTR:
 		n := n.(*ir.SelectorExpr)
 		p := s.exprPtr(n.X, n.Bounded(), n.Pos())
-		p = s.newValue1I(ssa.OpOffPtr, types.NewPtr(n.Type()), n.Offset(), p)
+		p = s.newValue1IA(ssa.OpOffPtr, types.NewPtr(n.Type()), n.Offset(), ssa.Int64ToAux(n.Selection.DfOffset), p)
 		return s.load(n.Type(), p)
 
 	case ir.OINDEX:

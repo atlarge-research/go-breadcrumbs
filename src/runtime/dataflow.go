@@ -15,3 +15,13 @@ func DfMark[T any](val T) int64 {
 func DfInspect[T any](val T) int64 {
 	return -1
 }
+
+//go:noinline
+func DfGetArr() []int64 {
+	return nil
+}
+
+//go:noinline
+func DfGetBlockArr() []int64 {
+	return nil
+}

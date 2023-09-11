@@ -6,6 +6,7 @@ package types
 
 import (
 	"sort"
+	"strings"
 
 	"cmd/compile/internal/base"
 	"cmd/internal/src"
@@ -413,6 +414,19 @@ func CalcSize(t *Type) {
 		}
 		w = t.NumElem() * t.Elem().width
 		t.align = t.Elem().align
+		// Add additional space for dataflow
+		if sym := t.Sym(); sym != nil && !strings.HasPrefix(sym.Pkg.Path, "internal") &&
+			!strings.HasPrefix(sym.Pkg.Path, "runtime") &&
+			!strings.HasPrefix(sym.Pkg.Path, "sync") &&
+			!strings.HasPrefix(sym.Pkg.Path, "syscall") &&
+			!strings.HasPrefix(sym.Pkg.Path, "unsafe") &&
+			!strings.HasPrefix(sym.Pkg.Path, "reflect") &&
+			!strings.HasPrefix(sym.Pkg.Path, "cmd/") {
+
+			aligned := RoundUp(w, 8)
+			additionalMem := t.NumComponents(true) * 8
+			w = aligned + additionalMem
+		}
 
 	case TSLICE:
 		if t.Elem() == nil {
@@ -431,6 +445,21 @@ func CalcSize(t *Type) {
 			t.SetNotInHeap(true)
 		}
 		w = calcStructOffset(t, t, 0, 1)
+		// Add additional space for dataflow
+		// But not internal stuff. Internal structs are used to access cpu registers and stuff
+		// Errors occur whenever structs are use to prevent false sharing in cache for example
+		if sym := t.Sym(); sym != nil && !strings.HasPrefix(sym.Pkg.Path, "internal") &&
+			!strings.HasPrefix(sym.Pkg.Path, "runtime") &&
+			!strings.HasPrefix(sym.Pkg.Path, "sync") &&
+			!strings.HasPrefix(sym.Pkg.Path, "syscall") &&
+			!strings.HasPrefix(sym.Pkg.Path, "unsafe") &&
+			!strings.HasPrefix(sym.Pkg.Path, "reflect") &&
+			!strings.HasPrefix(sym.Pkg.Path, "cmd/") {
+
+			aligned := RoundUp(w, 8)
+			additionalMem := t.NumComponents(true) * 8
+			w = aligned + additionalMem
+		}
 
 	// make fake type to check later to
 	// trigger function argument computation.

@@ -6,6 +6,7 @@ import (
 	"cmd/compile/internal/types"
 	"cmd/internal/src"
 	"log"
+	"strings"
 )
 
 func Funcs(all []ir.Node) {
@@ -176,10 +177,23 @@ func instrument(fn *ir.Func) {
 		}
 	}
 
+	dfInHeap := false
+	blockDfInHeap := false
 	totalNodes := 0
 	for _, n := range fn.Body {
 		totalNodes += 1
-		ir.DoChildren(n, func(_ ir.Node) bool {
+		ir.DoChildren(n, func(current ir.Node) bool {
+			if current.Op() == ir.OCALLFUNC {
+				current := current.(*ir.CallExpr)
+				fnname := current.X.Sym().Name
+				if strings.HasPrefix(fnname, "DfGetArr") {
+					dfInHeap = true
+				}
+				if strings.HasPrefix(fnname, "DfGetBlockArr") {
+					blockDfInHeap = true
+				}
+			}
+
 			totalNodes += 1
 			return false
 		})
@@ -214,7 +228,53 @@ func instrument(fn *ir.Func) {
 	fn.Dcl = append(fn.Dcl, dfArrName)
 	fn.Dcl = append(fn.Dcl, blockDfName)
 
-	as1 := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, dfArrName, nil))
-	as2 := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, blockDfName, nil))
-	fn.Body.Prepend(as1, as2)
+	dfArrDecl := typecheck.Stmt(ir.NewDecl(src.NoXPos, ir.ODCL, dfArrName))
+	dfArrAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, dfArrName, nil))
+	blockDfDecl := typecheck.Stmt(ir.NewDecl(src.NoXPos, ir.ODCL, blockDfName))
+	blockDfAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, blockDfName, nil))
+	fn.Body.Prepend(dfArrDecl, dfArrAssign, blockDfDecl, blockDfAssign)
+
+	if dfInHeap {
+		dfArrRetSym := &types.Sym{
+			Name: "__dfarrret_arr",
+			Pkg:  fn.Sym().Pkg,
+		}
+		dfArrRetName := ir.NewNameAt(src.NoXPos, dfArrRetSym)
+		dfArrRetName.Class = ir.PAUTO
+		dfArrRetName.Curfn = fn
+		dfArrRetName.SetType(dfArrayType)
+		dfArrRetName.SetUsed(true)
+		dfArrRetName.SetAddrtaken(true)
+		dfArrRetName.SetEsc(ir.EscHeap)
+
+		fn.Dcl = append(fn.Dcl, dfArrRetName)
+		dfArrRetDecl := typecheck.Stmt(ir.NewDecl(src.NoXPos, ir.ODCL, dfArrRetName))
+		dfArrRetAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, dfArrRetName, nil))
+		dfArrRetDecl.SetEsc(ir.EscHeap)
+		dfArrRetAssign.SetEsc(ir.EscHeap)
+
+		fn.Body.Prepend(dfArrRetDecl, dfArrRetAssign)
+	}
+
+	if blockDfInHeap {
+		dfArrRetSym := &types.Sym{
+			Name: "__blockdfarrret_arr",
+			Pkg:  fn.Sym().Pkg,
+		}
+		dfArrRetName := ir.NewNameAt(src.NoXPos, dfArrRetSym)
+		dfArrRetName.Class = ir.PAUTO
+		dfArrRetName.Curfn = fn
+		dfArrRetName.SetType(dfArrayType)
+		dfArrRetName.SetUsed(true)
+		dfArrRetName.SetAddrtaken(true)
+		dfArrRetName.SetEsc(ir.EscHeap)
+
+		fn.Dcl = append(fn.Dcl, dfArrRetName)
+		dfArrRetDecl := typecheck.Stmt(ir.NewDecl(src.NoXPos, ir.ODCL, dfArrRetName))
+		dfArrRetAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, dfArrRetName, nil))
+		dfArrRetDecl.SetEsc(ir.EscHeap)
+		dfArrRetAssign.SetEsc(ir.EscHeap)
+
+		fn.Body.Prepend(dfArrRetDecl, dfArrRetAssign)
+	}
 }

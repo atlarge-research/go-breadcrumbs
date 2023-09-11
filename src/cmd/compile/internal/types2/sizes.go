@@ -165,7 +165,11 @@ func (s *StdSizes) Sizeof(T Type) int64 {
 		// n > 0
 		a := s.Alignof(t.elem)
 		z := s.Sizeof(t.elem)
-		return align(z, a)*(n-1) + z
+		ogSize := align(z, a)*(n-1) + z
+		aligned := align(ogSize, 8)
+		additionalMem := int64(n * 8)
+		return aligned + additionalMem
+		// return ogSize
 	case *Slice:
 		return s.WordSize * 3
 	case *Struct:
@@ -174,7 +178,11 @@ func (s *StdSizes) Sizeof(T Type) int64 {
 			return 0
 		}
 		offsets := s.Offsetsof(t.fields)
-		return offsets[n-1] + s.Sizeof(t.fields[n-1].typ)
+		ogSize := offsets[n-1] + s.Sizeof(t.fields[n-1].typ)
+		aligned := align(ogSize, 8)
+		additionalMem := int64(n * 8)
+		return aligned + additionalMem
+		// return ogSize
 	case *Interface:
 		// Type parameters lead to variable sizes/alignments;
 		// StdSizes.Sizeof won't be called for them.
