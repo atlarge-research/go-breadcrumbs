@@ -32,6 +32,7 @@ func instrument(fn *ir.Func) {
 	prevParamsSize := len(prevParamsFields)
 	newParamsFields := make([]*types.Field, 0, 2*prevParamsSize)
 	paramsDf := make([]*ir.Name, 0, 2*prevParamsSize)
+	paramsDfPtrs := make([]*ir.Name, 0, prevParamsSize)
 	// Param order is value, [dfptr], df, blockdf
 	for i := 0; i < prevParamsSize; i++ {
 		prevField := prevParamsFields[i]
@@ -67,6 +68,7 @@ func instrument(fn *ir.Func) {
 
 			newParamsFields = append(newParamsFields, newField)
 			paramsDf = append(paramsDf, newName)
+			paramsDfPtrs = append(paramsDfPtrs, newName)
 		}
 	}
 	// Pass block df as the last df parameter
@@ -199,7 +201,22 @@ func instrument(fn *ir.Func) {
 		})
 	}
 
-	dfArrayType := types.NewArray(dfBmType, int64(totalNodes*3))
+	// Df code called from nondf code will not pass in df pointer
+	// Allocate empty df pointers for such cases
+	for _, paramDfPtrName := range paramsDfPtrs {
+		nilexpr := ir.NewNilExpr(src.NoXPos)
+		nilexpr.SetType(dfBmType.PtrTo())
+		cond := ir.NewBinaryExpr(src.NoXPos, ir.OEQ, paramDfPtrName, nilexpr)
+		then := []ir.Node{
+			ir.NewAssignStmt(src.NoXPos, paramDfPtrName,
+				ir.NewUnaryExpr(src.NoXPos, ir.ONEW, ir.TypeNode(dfBmType))),
+		}
+		dfptrnilcheck := typecheck.Stmt(ir.NewIfStmt(src.NoXPos, cond, then, nil))
+		fn.Body.Prepend(dfptrnilcheck)
+	}
+
+	// Initializing dataflow arrays
+	dfArrayType := types.NewArray(dfBmType, int64(totalNodes*4))
 	types.CalcSize(dfArrayType)
 
 	dfArrSym := &types.Sym{

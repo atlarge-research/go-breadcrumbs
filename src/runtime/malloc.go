@@ -1251,7 +1251,12 @@ func memclrNoHeapPointersChunked(size uintptr, x unsafe.Pointer) {
 // compiler (both frontend and SSA backend) knows the signature
 // of this function.
 func newobject(typ *_type) unsafe.Pointer {
-	return mallocgc(typ.size, typ, true)
+	size := typ.size
+	if typ.kind <= 16 { // Scalar type from typekind.go
+		align := size % 8
+		size = typ.size + align + 8 // 8 bytes for df
+	}
+	return mallocgc(size, typ, true)
 }
 
 //go:linkname reflect_unsafe_New reflect.unsafe_New

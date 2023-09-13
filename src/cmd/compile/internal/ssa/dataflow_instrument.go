@@ -112,6 +112,17 @@ func (d *dfInstrumentState) findDfArrays() {
 func (d *dfInstrumentState) visitBlocks() {
 	lastMemOfBlock := make(map[*Block]*Value)
 
+	firstBlock := d.f.Blocks[0]
+	dfPtrsExist := false
+	for _, localSlot := range d.f.Names {
+		if localSlot.N.Class == ir.PPARAM &&
+			strings.HasPrefix(localSlot.String(), "_dfptr_") {
+
+			dfPtrsExist = true
+			break
+		}
+	}
+
 	// 	// Only add a block to queue if all its dependencies have been visited
 	// 	// OLD: It's a topological sort to ensure all predecessor blocks have been processed
 	// 	// and their memory values obtained before processing a block
@@ -120,9 +131,21 @@ func (d *dfInstrumentState) visitBlocks() {
 	// 	for _, succ := range currentBlock.Succs {
 	// 		blockQueue = append(blockQueue, succ.Block())
 	// 	}
-	for _, currentBlock := range d.f.Blocks {
 
+	// Initial blocks are used for checking if passed in dfptrs are nils
+	// Skipping them
+	// Blocks is supposed to be unordered. But assuming order at least for the first nil checks works
+	for _, currentBlock := range d.f.Blocks {
 		initialValues := currentBlock.Values[:]
+
+		onlyParseArgsAndPassMem := false
+		// Skip blocks which are just nil checks for passed in dfptrs
+		// We do that by checking if the control values of a block and
+		// the function itself don't have the same position
+		if dfPtrsExist && currentBlock.Pos.SameFileAndLine(firstBlock.Pos) {
+			// Parse args and pass through mem values
+			onlyParseArgsAndPassMem = true
+		}
 
 		// Check if mem Phi or Copy exist
 		// If not, create one
@@ -173,7 +196,12 @@ func (d *dfInstrumentState) visitBlocks() {
 		d.currentBlock = currentBlock
 		d.currentBlockDf = currentBlockDf
 		d.initialValues = initialValues
-		makeResultValue := d.visitValues()
+		var makeResultValue *Value
+		if onlyParseArgsAndPassMem {
+			d.onlyPassMem()
+		} else {
+			makeResultValue = d.visitValues()
+		}
 		d.currentBlock = nil
 		d.currentBlockDf = nil
 		d.initialValues = nil
@@ -230,11 +258,44 @@ func (d *dfInstrumentState) visitBlocks() {
 					if !d.isPhiDfPtr[currentVal.ID] {
 						dfPtr := d.ptrToDfPtr[currentVal.ID]
 						for _, arg1 := range currentVal.Args {
-							dfPtr.AddArg(d.ptrToDfPtr[arg1.ID])
+							argDfPtr := d.ptrToDfPtr[arg1.ID]
+							if argDfPtr != nil {
+								dfPtr.AddArg(argDfPtr)
+								continue
+							}
+
+							// dfptr for the arg was not found
+							// This is passed in dfptr
+							// Make this a PhiNode of arg and selectN from malloc
+							currentVal.reset(OpPhi)
+							// Search for this value in names
+
+							// Find arg and select for that name
+							// Assign them as args
 						}
 					}
 				}
 			}
+		}
+	}
+}
+
+func (d *dfInstrumentState) onlyPassMem() {
+	for vidx := 0; vidx < len(d.initialValues); vidx++ {
+		currentVal := d.initialValues[vidx]
+
+		if len(currentVal.Args) == 0 {
+			continue
+		}
+
+		if currentVal.Op == OpArg {
+			d.extractDfOfArg(currentVal)
+
+			continue
+		}
+
+		if currentVal.Type.IsMemory() {
+			d.resetMem(currentVal)
 		}
 	}
 }
@@ -250,12 +311,6 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			currentVal.Op == OpIsInBounds ||
 			currentVal.Op == OpPanicBounds ||
 			currentVal.Op == OpAddr {
-			continue
-		}
-
-		if currentVal.Op == OpArg {
-			d.extractDfOfArg(currentVal)
-
 			continue
 		}
 
@@ -278,7 +333,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 		}
 
 		// This like memory init, sp init, args dont need to be tracked
-		if len(currentVal.Args) < 1 {
+		if len(currentVal.Args) == 0 {
 			continue
 		}
 
@@ -301,6 +356,10 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			isMarkInspect, vidx = d.markInspectMachinery(currentVal, vidx)
 			if isMarkInspect {
 				continue
+			}
+
+			if strings.HasPrefix(auxCall.Fn.Name, "runtime.newobject") {
+				_, vidx = d.computeDfIndex(currentVal, vidx)
 			}
 
 			// For call from dataflow to non dataflow functions
@@ -340,7 +399,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			// Arg and SelectN of pointers should be evaluated in arg and static call
 
 			// Compute array indices based on this address/pointer instruction
-			passDf := d.computeDfIndex(currentVal)
+			passDf, _ := d.computeDfIndex(currentVal, -1)
 			// Need to pass dataflow for pointer traversal and Phis
 			if !passDf {
 				continue
@@ -661,7 +720,7 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 		nextVal = d.initialValues[vidx+retidx]
 	}
 	vidx = vidx + retidx - 1
-	// The -1 is necessary as the counter will be incremented at the end of loop
+	// The -1 is necessary as we incremented retidx before breaking out of the above loop
 
 	// Get block df from return
 	blockDfRet := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
@@ -787,11 +846,11 @@ func (d *dfInstrumentState) moveMem(currentVal *Value) {
 	}
 }
 
-func (d *dfInstrumentState) computeDfIndex(currentVal *Value) (passDf bool) {
+func (d *dfInstrumentState) computeDfIndex(currentVal *Value, vidx int) (bool, int) {
 	valPos := currentVal.Pos
-	pointeeType := currentVal.Type.Elem()
 
 	if currentVal.Op == OpLocalAddr {
+		pointeeType := currentVal.Type.Elem()
 		prevArg1 := currentVal.Args[0]
 		// Need to do this as mem value could have changed in the meantime
 		currentVal.SetArgs2(prevArg1, d.lastMem)
@@ -825,12 +884,34 @@ func (d *dfInstrumentState) computeDfIndex(currentVal *Value) (passDf bool) {
 
 		d.nameToDfPtr[valNameStr] = dfPtr
 		d.ptrToDfPtr[currentVal.ID] = dfPtr
-		return false
+		return false, vidx
 	} else if currentVal.Op == OpCopy || currentVal.Op == OpPhi {
 		dfPtr := d.currentBlock.NewValue0(valPos, currentVal.Op, dfBmType.PtrTo())
 		d.ptrToDfPtr[currentVal.ID] = dfPtr
 		d.isPhiDfPtr[dfPtr.ID] = true
-		return true
+		return true, vidx
+	} else if currentVal.Op == OpStaticLECall {
+		d.resetMem(currentVal)
+		returnedMem := d.initialValues[vidx+1]
+		d.resetMem(returnedMem)
+		returnedPtr := d.initialValues[vidx+2]
+
+		pointeeType := returnedPtr.Type.Elem()
+		var dfStart int64
+		if pointeeType.IsScalar() {
+			// Not dealing with 16byte values yet
+			dfStart = 8
+		} else {
+			fullSize := pointeeType.Size()
+			// NumComponents returns 1 for scala values. So, no need for scalar check here
+			dfSize := pointeeType.NumComponents(true) * dfBmType.Size()
+			dfStart = fullSize - dfSize
+		}
+		dfPtr := d.currentBlock.NewValue1I(valPos, OpOffPtr, dfBmType.PtrTo(),
+			dfStart, returnedPtr)
+
+		d.ptrToDfPtr[returnedPtr.ID] = dfPtr
+		return false, vidx + 2
 	}
 
 	prevPtr := currentVal.Args[0]
@@ -850,7 +931,7 @@ func (d *dfInstrumentState) computeDfIndex(currentVal *Value) (passDf bool) {
 	}
 
 	d.ptrToDfPtr[currentVal.ID] = dfPtr
-	return true
+	return true, vidx
 }
 
 func (d *dfInstrumentState) loadStore(currentVal *Value) {

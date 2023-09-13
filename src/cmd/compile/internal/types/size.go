@@ -339,7 +339,8 @@ func CalcSize(t *Type) {
 		t.align = uint8(RegSize)
 
 	case TPTR:
-		w = int64(PtrSize)
+		// Doubling pointer size to store pointer and dfpointer in the same place
+		w = int64(PtrSize * 2)
 		CheckSize(t.Elem())
 
 	case TUNSAFEPTR:
