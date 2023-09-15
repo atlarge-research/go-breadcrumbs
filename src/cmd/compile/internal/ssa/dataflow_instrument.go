@@ -34,6 +34,7 @@ type dfInstrumentState struct {
 	nameToDfPtr       map[string]*Value
 	ptrToDfPtr        map[ID]*Value
 	isPhiDfPtr        map[ID]bool
+	safeDfPtrs        map[string]*Value
 }
 
 func (d *dfInstrumentState) init() {
@@ -47,6 +48,7 @@ func (d *dfInstrumentState) init() {
 	d.nameToDfPtr = make(map[string]*Value)
 	d.ptrToDfPtr = make(map[ID]*Value)
 	d.isPhiDfPtr = make(map[ID]bool)
+	d.safeDfPtrs = make(map[string]*Value)
 }
 
 func (d *dfInstrumentState) findDfArrays() {
@@ -58,6 +60,14 @@ func (d *dfInstrumentState) findDfArrays() {
 		if strings.HasPrefix(name.String(), "&__blockdfarrret_arr") {
 			d.blockDfArrRetVal = values[0]
 		}
+
+		safeDfPtrNameWithType := name.String()
+		if strings.HasPrefix(safeDfPtrNameWithType, "_safe__dfptr_") {
+			safeDfPtrName := strings.Split(safeDfPtrNameWithType, "[")[0]
+			cval := values[0]
+			d.safeDfPtrs[safeDfPtrName] = cval
+			d.isPhiDfPtr[cval.ID] = true
+		}
 	}
 	firstBlock := d.f.Blocks[0]
 	fbInitialValues := firstBlock.Values[:]
@@ -65,6 +75,14 @@ func (d *dfInstrumentState) findDfArrays() {
 	// Search for dataflow array name
 	for vidx := 1; vidx < len(fbInitialValues); vidx++ {
 		currentVal := fbInitialValues[vidx]
+
+		// if currentVal.Op == OpConstNil {
+		// 	// Df code needs to be generated even for nil pointers
+		// 	// As nil ptr exceptions are only caught at runtime
+		// 	// Const values always occur before dataflow arr
+		// 	d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
+		// 	continue
+		// }
 
 		if currentVal.Op == OpLocalAddr {
 			valName, ok := currentVal.Aux.(*ir.Name)
@@ -246,7 +264,9 @@ func (d *dfInstrumentState) visitBlocks() {
 	// For memory phi/copy value, we need to change the memory vars after dataflow analysis
 	// Actually populate the values now that we know the last mem of all blocks
 	for _, currentBlock := range d.f.Blocks {
+
 		for _, currentVal := range currentBlock.Values {
+
 			if currentVal.Op == OpPhi || currentVal.Op == OpCopy {
 				if currentVal.Type.IsMemory() {
 					for _, pred := range currentBlock.Preds {
@@ -255,24 +275,57 @@ func (d *dfInstrumentState) visitBlocks() {
 					}
 				} else if currentVal.Type.IsPtr() {
 					// Deal with the dfptr of pointers
-					if !d.isPhiDfPtr[currentVal.ID] {
-						dfPtr := d.ptrToDfPtr[currentVal.ID]
+					if d.isPhiDfPtr[currentVal.ID] {
+						continue
+					}
+
+					if dfPtrsExist && currentBlock.Pos.SameFileAndLine(firstBlock.Pos) {
 						for _, arg1 := range currentVal.Args {
-							argDfPtr := d.ptrToDfPtr[arg1.ID]
-							if argDfPtr != nil {
-								dfPtr.AddArg(argDfPtr)
-								continue
+							// So, we don't need to pass the df for nil ptr
+							// It will happen automatically here
+							if arg1.Op == OpConstNil {
+								d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
+								break
 							}
-
-							// dfptr for the arg was not found
-							// This is passed in dfptr
-							// Make this a PhiNode of arg and selectN from malloc
-							currentVal.reset(OpPhi)
-							// Search for this value in names
-
-							// Find arg and select for that name
-							// Assign them as args
 						}
+						continue
+					}
+
+					dfPtr := d.ptrToDfPtr[currentVal.ID]
+					for _, arg1 := range currentVal.Args {
+						// So, we don't need to pass the df for nil ptr
+						// It will happen automatically here
+						if arg1.Op == OpConstNil {
+							d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
+							break
+						}
+
+						argDfPtr := d.ptrToDfPtr[arg1.ID]
+						if argDfPtr != nil {
+							dfPtr.AddArg(argDfPtr)
+							continue
+						}
+
+						var argNameStr string = ""
+						for name, values := range d.f.NamedValues {
+							for _, value := range values {
+								if value.ID == currentVal.ID {
+									argNameStr = strings.Split(name.String(), "[")[0]
+									break
+								}
+							}
+						}
+
+						if argNameStr == "" {
+							log.Println(arg1)
+							log.Fatalln("Value not found in named values")
+						}
+
+						safeDfPtr := d.safeDfPtrs["_safe__dfptr_"+argNameStr]
+						if safeDfPtr == nil {
+							log.Fatalln("Did not find safe dfptr for:", argNameStr, currentVal)
+						}
+						dfPtr.AddArg(safeDfPtr)
 					}
 				}
 			}
@@ -294,6 +347,21 @@ func (d *dfInstrumentState) onlyPassMem() {
 			continue
 		}
 
+		if currentVal.ID <= d.blockDfZeroId {
+			continue
+		}
+
+		// if !d.isPhiDfPtr[currentVal.ID] &&
+		// 	((currentVal.Op == OpPhi && currentVal.Type.IsPtr()) ||
+		// 		(currentVal.Op == OpCopy && currentVal.Type.IsPtr())) {
+
+		// 	passDf, _ := d.computeDfIndex(currentVal, -1)
+		// 	// Need to pass dataflow for pointer traversal and Phis
+		// 	if !passDf {
+		// 		continue
+		// 	}
+		// }
+
 		if currentVal.Type.IsMemory() {
 			d.resetMem(currentVal)
 		}
@@ -314,10 +382,16 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			continue
 		}
 
-		if currentVal.Op == OpConstNil {
-			// Df code needs to be generated even for nil pointers
-			// As nil ptr exceptions are only caught at runtime
-			d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
+		// We added safedfptrs to this map
+		// Skip if we find them
+		if d.isPhiDfPtr[currentVal.ID] {
+			continue
+		}
+
+		if currentVal.Op == OpArg {
+			d.extractDfOfArg(currentVal)
+
+			continue
 		}
 
 		// Code won't work with non-optimized builds for now
@@ -455,12 +529,13 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
 			argDfPtr, currentVal, d.lastMem)
 	} else if strings.HasPrefix(argNameStr, "_dfptr_") {
+		// IGNORE: We will deal with it when dealing with Phis
 		// Pointer to dataflow
-		origArgName := strings.Trim(argNameStr, "_dfptr_")
-		origArgID := ID(d.argNameStrToDfIdx[origArgName])
+		// origArgName := strings.Trim(argNameStr, "_dfptr_")
+		// origArgID := ID(d.argNameStrToDfIdx[origArgName])
 
-		d.nameToDfPtr[origArgName] = currentVal
-		d.ptrToDfPtr[origArgID] = currentVal
+		// d.nameToDfPtr[origArgName] = currentVal
+		// d.ptrToDfPtr[origArgID] = currentVal
 	} else if strings.HasPrefix(argNameStr, "_dfblock_") {
 		d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
 			d.currentBlockDf, currentVal)

@@ -129,7 +129,7 @@ func instrument(fn *ir.Func) {
 		newName.Curfn = prevResField.Nname.(*ir.Name).Curfn
 		newName.SetType(dfBmType.PtrTo())
 
-		newField = types.NewField(prevResField.Pos, newSym, dfBmType)
+		newField = types.NewField(prevResField.Pos, newSym, dfBmType.PtrTo())
 		newField.Nname = newName
 
 		newResultsFields = append(newResultsFields, newField)
@@ -199,6 +199,23 @@ func instrument(fn *ir.Func) {
 			totalNodes += 1
 			return false
 		})
+	}
+
+	// Use the df pointers after nil check so that copy and phi nodes are generated
+	// We will delete these uses later
+	for _, paramDfPtrName := range paramsDfPtrs {
+		safeDfPtrSym := &types.Sym{
+			Name: "_safe_" + paramDfPtrName.Sym().Name,
+			Pkg:  fn.Sym().Pkg,
+		}
+		safeDfPtrName := ir.NewNameAt(src.NoXPos, safeDfPtrSym)
+		safeDfPtrName.Class = ir.PAUTO
+		safeDfPtrName.Curfn = fn
+		safeDfPtrName.SetType(dfBmType.PtrTo())
+		safeDfPtrName.SetUsed(true)
+
+		dummyAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, safeDfPtrName, paramDfPtrName))
+		fn.Body.Prepend(dummyAssign)
 	}
 
 	// Df code called from nondf code will not pass in df pointer
