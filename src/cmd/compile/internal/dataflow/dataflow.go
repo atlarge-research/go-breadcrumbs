@@ -179,28 +179,6 @@ func instrument(fn *ir.Func) {
 		}
 	}
 
-	dfInHeap := false
-	blockDfInHeap := false
-	totalNodes := 0
-	for _, n := range fn.Body {
-		totalNodes += 1
-		ir.DoChildren(n, func(current ir.Node) bool {
-			if current.Op() == ir.OCALLFUNC {
-				current := current.(*ir.CallExpr)
-				fnname := current.X.Sym().Name
-				if strings.HasPrefix(fnname, "DfGetArr") {
-					dfInHeap = true
-				}
-				if strings.HasPrefix(fnname, "DfGetBlockArr") {
-					blockDfInHeap = true
-				}
-			}
-
-			totalNodes += 1
-			return false
-		})
-	}
-
 	// Use the df pointers after nil check so that copy and phi nodes are generated
 	// We will delete these uses later
 	for _, paramDfPtrName := range paramsDfPtrs {
@@ -232,8 +210,41 @@ func instrument(fn *ir.Func) {
 		fn.Body.Prepend(dfptrnilcheck)
 	}
 
+	dfInHeap := false
+	blockDfInHeap := false
+	totalNodes := 0
+	decisionNodes := 0
+	for _, n := range fn.Body {
+		totalNodes += 1
+		ir.DoChildren(n, func(current ir.Node) bool {
+			if current.Op() == ir.OCALLFUNC {
+				current := current.(*ir.CallExpr)
+				fnname := current.X.Sym().Name
+				if strings.HasPrefix(fnname, "DfGetArr") {
+					dfInHeap = true
+				}
+				if strings.HasPrefix(fnname, "DfGetBlockArr") {
+					blockDfInHeap = true
+				}
+			}
+
+			cOp := current.Op()
+			if cOp == ir.OIF || cOp == ir.OFOR || cOp == ir.OSWITCH ||
+				cOp == ir.OJUMPTABLE {
+				decisionNodes += 1
+			}
+
+			totalNodes += 1
+			return false
+		})
+	}
+
 	// Initializing dataflow arrays
-	dfArrayType := types.NewArray(dfBmType, int64(totalNodes*4))
+	dfArrSizeBase := totalNodes // +
+	// (decisionNodes * 10) // dfptr related ifs are also included
+	// multipliers based on addr,load,addr,load,or,addr,store
+	// if ptr add ptr,load,ptr,load,or,ptr,store
+	dfArrayType := types.NewArray(dfBmType, int64(dfArrSizeBase*14))
 	types.CalcSize(dfArrayType)
 
 	dfArrSym := &types.Sym{
@@ -246,7 +257,7 @@ func instrument(fn *ir.Func) {
 	dfArrName.SetType(dfArrayType)
 	dfArrName.SetUsed(true)
 
-	blockArrayType := types.NewArray(dfBmType, int64(totalNodes))
+	blockArrayType := types.NewArray(dfBmType, int64(dfArrSizeBase))
 	types.CalcSize(blockArrayType)
 
 	blockDfSym := &types.Sym{

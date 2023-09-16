@@ -221,6 +221,8 @@ func (d *dfInstrumentState) visitBlocks() {
 			makeResultValue = d.visitValues()
 		}
 		d.currentBlock = nil
+		// Could be read from Arg
+		currentBlockDf = d.currentBlockDf
 		d.currentBlockDf = nil
 		d.initialValues = nil
 
@@ -337,13 +339,13 @@ func (d *dfInstrumentState) onlyPassMem() {
 	for vidx := 0; vidx < len(d.initialValues); vidx++ {
 		currentVal := d.initialValues[vidx]
 
-		if len(currentVal.Args) == 0 {
-			continue
-		}
-
 		if currentVal.Op == OpArg {
 			d.extractDfOfArg(currentVal)
 
+			continue
+		}
+
+		if len(currentVal.Args) == 0 {
 			continue
 		}
 
@@ -351,19 +353,13 @@ func (d *dfInstrumentState) onlyPassMem() {
 			continue
 		}
 
-		// if !d.isPhiDfPtr[currentVal.ID] &&
-		// 	((currentVal.Op == OpPhi && currentVal.Type.IsPtr()) ||
-		// 		(currentVal.Op == OpCopy && currentVal.Type.IsPtr())) {
-
-		// 	passDf, _ := d.computeDfIndex(currentVal, -1)
-		// 	// Need to pass dataflow for pointer traversal and Phis
-		// 	if !passDf {
-		// 		continue
-		// 	}
-		// }
-
 		if currentVal.Type.IsMemory() {
 			d.resetMem(currentVal)
+		}
+
+		// Need to do this to propagate df aross copies and phis
+		if currentVal.Op == OpCopy || currentVal.Op == OpPhi {
+			d.propagateDfFromArgs(currentVal)
 		}
 	}
 }
@@ -537,8 +533,8 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 		// d.nameToDfPtr[origArgName] = currentVal
 		// d.ptrToDfPtr[origArgID] = currentVal
 	} else if strings.HasPrefix(argNameStr, "_dfblock_") {
-		d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
-			d.currentBlockDf, currentVal)
+		// args, hence blockdf, are always in the first block
+		d.currentBlockDf = currentVal
 	} else {
 		// normal arg
 		d.argNameStrToDfIdx[argNameStr] = int64(currentVal.ID)
