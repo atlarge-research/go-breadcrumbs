@@ -152,7 +152,7 @@ func (d *dfInstrumentState) visitBlocks() {
 
 	// Initial blocks are used for checking if passed in dfptrs are nils
 	// Skipping them
-	// Blocks is supposed to be unordered. But assuming order at least for the first nil checks works
+	// Blocks are supposed to be unordered. But assuming order at least for the first nil checks works
 	for _, currentBlock := range d.f.Blocks {
 		initialValues := currentBlock.Values[:]
 
@@ -378,7 +378,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			continue
 		}
 
-		// We added safedfptrs to this map
+		// We added safe_dfptrs to this map
 		// Skip if we find them
 		if d.isPhiDfPtr[currentVal.ID] {
 			continue
@@ -429,7 +429,9 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			}
 
 			if strings.HasPrefix(auxCall.Fn.Name, "runtime.newobject") {
-				_, vidx = d.computeDfIndex(currentVal, vidx)
+				_, _ = d.computeDfIndex(currentVal, vidx)
+				vidx = d.propagateMemReturn(currentVal, vidx)
+				continue
 			}
 
 			// For call from dataflow to non dataflow functions
@@ -437,6 +439,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			// TODO: change this to pass dataflow through
 			// Combine df of all inputs and assign that to dataflow of all outputs
 			if !auxCall.Dataflow {
+				vidx = d.propagateMemReturn(currentVal, vidx)
 				continue
 			}
 
@@ -726,6 +729,31 @@ func (d *dfInstrumentState) markInspectMachinery(currentVal *Value, vidx int) (b
 	return false, vidx
 }
 
+func (d *dfInstrumentState) propagateMemReturn(currentVal *Value, vidx int) int {
+	numRealArgs := len(currentVal.Args) - 1
+	realArgs := make([]*Value, numRealArgs)
+	copy(realArgs, currentVal.Args[:numRealArgs])
+	currentVal.resetArgs()
+	currentVal.AddArgs(realArgs...)
+	currentVal.AddArgs(d.lastMem)
+
+	retidx := 1
+	nextVal := d.initialValues[vidx+retidx]
+	for nextVal.Op == OpSelectN {
+		if nextVal.Type.IsMemory() {
+			// The correct memory location in the return
+			// is automatically obtained from func signature
+			d.lastMem = nextVal
+		}
+
+		retidx++
+		nextVal = d.initialValues[vidx+retidx]
+	}
+	vidx = vidx + retidx - 1
+
+	return vidx
+}
+
 func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	// No need to change type for this.
 	// Type was obtained automatically after
@@ -762,8 +790,6 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	currentVal.AddArgs(d.currentBlockDf)
 	currentVal.AddArgs(d.lastMem)
 
-	d.lastMem = currentVal
-
 	resultsType := currentVal.Type
 	numResults := int64(resultsType.NumFields())
 	// -2 = -1 for mem, another -1 for block df
@@ -793,7 +819,7 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 	vidx = vidx + retidx - 1
 	// The -1 is necessary as we incremented retidx before breaking out of the above loop
 
-	// Get block df from return
+	// Get block df from return [-1 is mem, -2 is blockdf]
 	blockDfRet := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
 		numResults-2, currentVal)
 	d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
@@ -805,16 +831,19 @@ func (d *dfInstrumentState) functionCall(currentVal *Value, vidx int) int {
 			// Actual program did not use this return
 			continue
 		}
+
+		retvalDfLoc := numRealResults + (2 * retVal.AuxInt)
+		retvalDfPtrLoc := retvalDfLoc + 1
 		// Use currentVal here as that is the function call
 		retvalDf := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
-			numRealResults+(2*retVal.AuxInt), currentVal)
+			retvalDfLoc, currentVal)
 		combinedDf := d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
 			d.currentBlockDf, retvalDf)
 		dfValues = append(dfValues, combinedDf)
 
 		if retVal.Type.IsPtr() {
 			dfPtr := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(),
-				numRealResults+(2*retVal.AuxInt)+1, currentVal)
+				retvalDfPtrLoc, currentVal)
 			dfValues = append(dfValues, dfPtr)
 		} else {
 			dfValues = append(dfValues, nil)
@@ -962,9 +991,6 @@ func (d *dfInstrumentState) computeDfIndex(currentVal *Value, vidx int) (bool, i
 		d.isPhiDfPtr[dfPtr.ID] = true
 		return true, vidx
 	} else if currentVal.Op == OpStaticLECall {
-		d.resetMem(currentVal)
-		returnedMem := d.initialValues[vidx+1]
-		d.resetMem(returnedMem)
 		returnedPtr := d.initialValues[vidx+2]
 
 		pointeeType := returnedPtr.Type.Elem()

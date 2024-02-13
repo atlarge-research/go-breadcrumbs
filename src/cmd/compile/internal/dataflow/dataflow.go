@@ -33,7 +33,7 @@ func instrument(fn *ir.Func) {
 	newParamsFields := make([]*types.Field, 0, 2*prevParamsSize)
 	paramsDf := make([]*ir.Name, 0, 2*prevParamsSize)
 	paramsDfPtrs := make([]*ir.Name, 0, prevParamsSize)
-	// Param order is value, [dfptr], df, blockdf
+	// Param order is values..., (df, [dfptr])..., blockdf
 	for i := 0; i < prevParamsSize; i++ {
 		prevField := prevParamsFields[i]
 
@@ -98,7 +98,8 @@ func instrument(fn *ir.Func) {
 	newResultsFields := make([]*types.Field, 0, 2*prevResultsSize)
 	resultsDf := make([]*ir.Name, 0, 2*prevResultsSize)
 	resultsDfNode := make([]ir.Node, 0, 2*prevResultsSize)
-	// Return order is value, [dfptr], df, blockdf
+	// Return order is Param order is values..., (df, dfptr)..., blockdf
+	// Notice that dfptrs are not optional in returns, unlike in input parameters
 	for i := 0; i < prevResultsSize; i++ {
 		prevResField := prevResultsFields[i]
 
