@@ -180,37 +180,6 @@ func instrument(fn *ir.Func) {
 		}
 	}
 
-	// Use the df pointers after nil check so that copy and phi nodes are generated
-	// We will delete these uses later
-	for _, paramDfPtrName := range paramsDfPtrs {
-		safeDfPtrSym := &types.Sym{
-			Name: "_safe_" + paramDfPtrName.Sym().Name,
-			Pkg:  fn.Sym().Pkg,
-		}
-		safeDfPtrName := ir.NewNameAt(src.NoXPos, safeDfPtrSym)
-		safeDfPtrName.Class = ir.PAUTO
-		safeDfPtrName.Curfn = fn
-		safeDfPtrName.SetType(dfBmType.PtrTo())
-		safeDfPtrName.SetUsed(true)
-
-		dummyAssign := typecheck.Stmt(ir.NewAssignStmt(src.NoXPos, safeDfPtrName, paramDfPtrName))
-		fn.Body.Prepend(dummyAssign)
-	}
-
-	// Df code called from nondf code will not pass in df pointer
-	// Allocate empty df pointers for such cases
-	for _, paramDfPtrName := range paramsDfPtrs {
-		nilexpr := ir.NewNilExpr(src.NoXPos)
-		nilexpr.SetType(dfBmType.PtrTo())
-		cond := ir.NewBinaryExpr(src.NoXPos, ir.OEQ, paramDfPtrName, nilexpr)
-		then := []ir.Node{
-			ir.NewAssignStmt(src.NoXPos, paramDfPtrName,
-				ir.NewUnaryExpr(src.NoXPos, ir.ONEW, ir.TypeNode(dfBmType))),
-		}
-		dfptrnilcheck := typecheck.Stmt(ir.NewIfStmt(src.NoXPos, cond, then, nil))
-		fn.Body.Prepend(dfptrnilcheck)
-	}
-
 	dfInHeap := false
 	blockDfInHeap := false
 	totalNodes := 0

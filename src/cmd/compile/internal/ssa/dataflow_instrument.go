@@ -60,14 +60,6 @@ func (d *dfInstrumentState) findDfArrays() {
 		if strings.HasPrefix(name.String(), "&__blockdfarrret_arr") {
 			d.blockDfArrRetVal = values[0]
 		}
-
-		safeDfPtrNameWithType := name.String()
-		if strings.HasPrefix(safeDfPtrNameWithType, "_safe__dfptr_") {
-			safeDfPtrName := strings.Split(safeDfPtrNameWithType, "[")[0]
-			cval := values[0]
-			d.safeDfPtrs[safeDfPtrName] = cval
-			d.isPhiDfPtr[cval.ID] = true
-		}
 	}
 	firstBlock := d.f.Blocks[0]
 	fbInitialValues := firstBlock.Values[:]
@@ -75,14 +67,6 @@ func (d *dfInstrumentState) findDfArrays() {
 	// Search for dataflow array name
 	for vidx := 1; vidx < len(fbInitialValues); vidx++ {
 		currentVal := fbInitialValues[vidx]
-
-		// if currentVal.Op == OpConstNil {
-		// 	// Df code needs to be generated even for nil pointers
-		// 	// As nil ptr exceptions are only caught at runtime
-		// 	// Const values always occur before dataflow arr
-		// 	d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
-		// 	continue
-		// }
 
 		if currentVal.Op == OpLocalAddr {
 			valName, ok := currentVal.Aux.(*ir.Name)
@@ -130,26 +114,6 @@ func (d *dfInstrumentState) findDfArrays() {
 func (d *dfInstrumentState) visitBlocks() {
 	lastMemOfBlock := make(map[*Block]*Value)
 
-	firstBlock := d.f.Blocks[0]
-	dfPtrsExist := false
-	for _, localSlot := range d.f.Names {
-		if localSlot.N.Class == ir.PPARAM &&
-			strings.HasPrefix(localSlot.String(), "_dfptr_") {
-
-			dfPtrsExist = true
-			break
-		}
-	}
-
-	// 	// Only add a block to queue if all its dependencies have been visited
-	// 	// OLD: It's a topological sort to ensure all predecessor blocks have been processed
-	// 	// and their memory values obtained before processing a block
-	// 	// NEW: topological sort isn't necessary as we populate all Phis with lastMem
-	// 	// after all blocks have been processed
-	// 	for _, succ := range currentBlock.Succs {
-	// 		blockQueue = append(blockQueue, succ.Block())
-	// 	}
-
 	// Initial blocks are used for checking if passed in dfptrs are nils
 	// Skipping them
 	// Blocks are supposed to be unordered. But assuming order at least for the first nil checks works
@@ -160,10 +124,10 @@ func (d *dfInstrumentState) visitBlocks() {
 		// Skip blocks which are just nil checks for passed in dfptrs
 		// We do that by checking if the control values of a block and
 		// the function itself don't have the same position
-		if dfPtrsExist && currentBlock.Pos.SameFileAndLine(firstBlock.Pos) {
-			// Parse args and pass through mem values
-			onlyParseArgsAndPassMem = true
-		}
+		// if dfPtrsExist && currentBlock.Pos.SameFileAndLine(firstBlock.Pos) {
+		// 	// Parse args and pass through mem values
+		// 	onlyParseArgsAndPassMem = true
+		// }
 
 		// Check if mem Phi or Copy exist
 		// If not, create one
@@ -281,18 +245,6 @@ func (d *dfInstrumentState) visitBlocks() {
 						continue
 					}
 
-					if dfPtrsExist && currentBlock.Pos.SameFileAndLine(firstBlock.Pos) {
-						for _, arg1 := range currentVal.Args {
-							// So, we don't need to pass the df for nil ptr
-							// It will happen automatically here
-							if arg1.Op == OpConstNil {
-								d.ptrToDfPtr[currentVal.ID] = d.f.ConstNil(dfBmType.PtrTo())
-								break
-							}
-						}
-						continue
-					}
-
 					dfPtr := d.ptrToDfPtr[currentVal.ID]
 					for _, arg1 := range currentVal.Args {
 						// So, we don't need to pass the df for nil ptr
@@ -303,31 +255,10 @@ func (d *dfInstrumentState) visitBlocks() {
 						}
 
 						argDfPtr := d.ptrToDfPtr[arg1.ID]
-						if argDfPtr != nil {
-							dfPtr.AddArg(argDfPtr)
-							continue
+						if argDfPtr == nil {
+							log.Fatalln("dfptr not found for ptr")
 						}
-
-						var argNameStr string = ""
-						for name, values := range d.f.NamedValues {
-							for _, value := range values {
-								if value.ID == currentVal.ID {
-									argNameStr = strings.Split(name.String(), "[")[0]
-									break
-								}
-							}
-						}
-
-						if argNameStr == "" {
-							log.Println(arg1)
-							log.Fatalln("Value not found in named values")
-						}
-
-						safeDfPtr := d.safeDfPtrs["_safe__dfptr_"+argNameStr]
-						if safeDfPtr == nil {
-							log.Fatalln("Did not find safe dfptr for:", argNameStr, currentVal)
-						}
-						dfPtr.AddArg(safeDfPtr)
+						dfPtr.AddArg(argDfPtr)
 					}
 				}
 			}
@@ -390,15 +321,8 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			continue
 		}
 
-		// Code won't work with non-optimized builds for now
-		// if currentVal.ID >= d.dfDeclId && currentVal.ID <= d.blockDfZeroId {
+		// Skip all dataflow array initialization code
 		if currentVal.ID <= d.blockDfZeroId {
-			// Don't propagate dataflow for __dataflow_ar and _blockdf_arr
-			// But, propagate the memory argument
-			// currentVal.Args[len(currentVal.Args)-1] = d.lastMem
-			// if currentVal.Type.IsMemory() {
-			// 	d.lastMem = currentVal
-			// }
 			continue
 		}
 
@@ -435,9 +359,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			}
 
 			// For call from dataflow to non dataflow functions
-			// Don't do anything
-			// TODO: change this to pass dataflow through
-			// Combine df of all inputs and assign that to dataflow of all outputs
+			// TODO: Combine df of all inputs and assign that to dataflow of all outputs
 			if !auxCall.Dataflow {
 				vidx = d.propagateMemReturn(currentVal, vidx)
 				continue
@@ -530,11 +452,11 @@ func (d *dfInstrumentState) extractDfOfArg(currentVal *Value) {
 	} else if strings.HasPrefix(argNameStr, "_dfptr_") {
 		// IGNORE: We will deal with it when dealing with Phis
 		// Pointer to dataflow
-		// origArgName := strings.Trim(argNameStr, "_dfptr_")
-		// origArgID := ID(d.argNameStrToDfIdx[origArgName])
+		origArgName := strings.Trim(argNameStr, "_dfptr_")
+		origArgID := ID(d.argNameStrToDfIdx[origArgName])
 
-		// d.nameToDfPtr[origArgName] = currentVal
-		// d.ptrToDfPtr[origArgID] = currentVal
+		d.nameToDfPtr[origArgName] = currentVal
+		d.ptrToDfPtr[origArgID] = currentVal
 	} else if strings.HasPrefix(argNameStr, "_dfblock_") {
 		// args, hence blockdf, are always in the first block
 		d.currentBlockDf = currentVal
