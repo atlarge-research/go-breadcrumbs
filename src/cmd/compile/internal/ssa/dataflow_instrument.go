@@ -2,6 +2,8 @@ package ssa
 
 import (
 	"cmd/compile/internal/ir"
+	"cmd/compile/internal/reflectdata"
+	"cmd/compile/internal/typecheck"
 	"cmd/compile/internal/types"
 	"cmd/internal/src"
 	"log"
@@ -17,6 +19,7 @@ type dfInstrumentState struct {
 	// Keep track of memory to maintain memory order
 	lastMem        *Value
 	sp             *Value
+	sb             *Value
 	currentBlock   *Block
 	currentBlockDf *Value
 	initialValues  []*Value
@@ -44,6 +47,7 @@ func (d *dfInstrumentState) init() {
 	firstBlock := d.f.Blocks[0]
 	d.lastMem = firstBlock.Values[0]
 	d.sp = firstBlock.Values[1]
+	d.sb = firstBlock.Values[2]
 	d.argNameStrToDfIdx = make(map[string]int64)
 	d.nameToDfPtr = make(map[string]*Value)
 	d.ptrToDfPtr = make(map[ID]*Value)
@@ -1069,8 +1073,8 @@ func dataflowInstrument(f *Func) {
 
 	if !f.Dataflow {
 		dfBmType = types.Types[types.TINT64]
-		for bidx := 0; bidx < len(f.Blocks); bidx++ {
-			currentBlock := f.Blocks[bidx]
+		sb := f.Blocks[0].Values[2]
+		for _, currentBlock := range f.Blocks {
 			initialValues := currentBlock.Values[:]
 
 			for vidx := 0; vidx < len(initialValues); vidx++ {
@@ -1083,6 +1087,7 @@ func dataflowInstrument(f *Func) {
 					// Type was obtained automatically after
 					// func signature modification
 
+					valPos := currentVal.Pos
 					auxCall := currentVal.Aux.(*AuxCall)
 					// For some calls, auxCall is nil, figure out why
 					if auxCall == nil || !auxCall.Dataflow {
@@ -1091,6 +1096,7 @@ func dataflowInstrument(f *Func) {
 
 					numRealArgs := int64(len(currentVal.Args) - 1)
 					// len-1 because last arg is memory location
+					lastMem := currentVal.Args[numRealArgs]
 					argDf := make([]*Value, 0, 2*numRealArgs)
 					for argidx := int64(0); argidx < numRealArgs; argidx++ {
 						argDf = append(argDf, f.ConstInt64(dfBmType, 0))
@@ -1098,13 +1104,51 @@ func dataflowInstrument(f *Func) {
 						if arg1.Type.IsPtr() {
 							// Using nil here will cause a panic
 							// TODO: Send a pointer to empty space instead
-							argDf = append(argDf, f.ConstNil(dfBmType.PtrTo()))
+							// argDf = append(argDf, f.ConstNil(dfBmType.PtrTo()))
+
+							if arg1.Type.IsScalar() {
+
+								newobjfunc := typecheck.LookupRuntimeFunc("newobject")
+
+								typelsym := reflectdata.TypeLinksym(dfBmType)
+								typeaddr := currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, sb)
+
+								results := []*types.Type{dfBmType.PtrTo()}
+								aux := StaticAuxCall(newobjfunc, f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type}, results))
+								call := currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
+								call.AddArgs(typeaddr, lastMem)
+								lastMem = currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
+								newDfPtr := currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
+
+								call.AuxInt = 16 // It's always 16 for newobject calls
+
+								argDf = append(argDf, newDfPtr)
+
+							} else {
+								numItems := arg1.Type.NumComponents(true)
+								newarrfunc := typecheck.LookupRuntimeFunc("newarray")
+
+								typelsym := reflectdata.TypeLinksym(dfBmType)
+								typeaddr := currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, sb)
+
+								numItemsConst := f.ConstInt32(types.Types[types.TINT32], int32(numItems))
+								results := []*types.Type{dfBmType.PtrTo()}
+								aux := StaticAuxCall(newarrfunc, f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type,
+									types.Types[types.TINT32]}, results))
+								call := currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
+								call.AddArgs(typeaddr, numItemsConst, lastMem)
+								lastMem = currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
+								newDfPtr := currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
+
+								call.AuxInt = 20 // It's always 16 for newobject calls
+
+								argDf = append(argDf, newDfPtr)
+							}
 						}
 					}
 					argDf = append(argDf, f.ConstInt64(dfBmType, 0)) // blockdf arg
 
 					realArgs := make([]*Value, numRealArgs)
-					lastMem := currentVal.Args[numRealArgs]
 					copy(realArgs, currentVal.Args[:numRealArgs])
 					currentVal.resetArgs()
 					currentVal.AddArgs(realArgs...)
