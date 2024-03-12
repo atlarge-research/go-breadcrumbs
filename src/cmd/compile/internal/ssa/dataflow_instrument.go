@@ -5,6 +5,7 @@ import (
 	"cmd/compile/internal/reflectdata"
 	"cmd/compile/internal/typecheck"
 	"cmd/compile/internal/types"
+	"cmd/internal/obj"
 	"cmd/internal/src"
 	"log"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 var dfBmType *types.Type
 var int32Type *types.Type
+var newArrayFuncSym *obj.LSym
 
 type dfInstrumentState struct {
 	f *Func
@@ -43,6 +45,7 @@ type dfInstrumentState struct {
 func (d *dfInstrumentState) init() {
 	dfBmType = types.Types[types.TINT64]
 	int32Type = types.Types[types.TINT32]
+	newArrayFuncSym = typecheck.LookupRuntimeFunc("newarray")
 
 	firstBlock := d.f.Blocks[0]
 	d.lastMem = firstBlock.Values[0]
@@ -365,7 +368,7 @@ func (d *dfInstrumentState) visitValues() (makeResultValue *Value) {
 			// For call from dataflow to non dataflow functions
 			// TODO: Combine df of all inputs and assign that to dataflow of all outputs
 			if !auxCall.Dataflow {
-				vidx = d.propagateMemReturn(currentVal, vidx)
+				vidx = d.passDfThrough(currentVal, vidx)
 				continue
 			}
 
@@ -676,6 +679,112 @@ func (d *dfInstrumentState) propagateMemReturn(currentVal *Value, vidx int) int 
 		nextVal = d.initialValues[vidx+retidx]
 	}
 	vidx = vidx + retidx - 1
+
+	return vidx
+}
+
+func (d *dfInstrumentState) passDfThrough(currentVal *Value, vidx int) int {
+	valPos := currentVal.Pos
+
+	numRealArgs := int64(len(currentVal.Args) - 1)
+	// len-1 because last arg is memory location
+	combinedDf := d.currentBlockDf
+	for argidx := int64(0); argidx < numRealArgs; argidx++ {
+		arg1 := currentVal.Args[argidx]
+
+		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+			d.dfArrType.PtrTo(), d.dfArrName, d.sp, d.lastMem)
+		argDfPtr := d.currentBlock.NewValue1I(valPos, OpOffPtr, dfBmType.PtrTo(),
+			int64(arg1.ID)*dfBmType.Size(), dfArr)
+		paramDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, argDfPtr, d.lastMem)
+		combinedDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+			combinedDf, paramDf)
+
+		if arg1.Type.IsPtr() {
+			dfPtr := d.ptrToDfPtr[arg1.ID]
+			dfPtrDf := d.currentBlock.NewValue2(valPos, OpLoad, dfBmType, dfPtr, d.lastMem)
+			combinedDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+				combinedDf, dfPtrDf)
+		}
+	}
+
+	// Repalce mem argument of function call
+	realArgs := make([]*Value, numRealArgs)
+	copy(realArgs, currentVal.Args[:numRealArgs])
+	currentVal.resetArgs()
+	currentVal.AddArgs(realArgs...)
+	currentVal.AddArgs(d.lastMem)
+
+	// Process return values
+	resultsType := currentVal.Type
+	numResults := int64(resultsType.NumFields())
+	// -1 for mem
+	numRealResults := numResults - 1
+	realReturnValues := make([]*Value, numRealResults)
+	retidx := 1
+	nextVal := d.initialValues[vidx+retidx]
+	for nextVal.Op == OpSelectN {
+		if nextVal.Type.IsMemory() {
+			// The correct memory location in the return
+			// is automatically obtained from func signature
+			d.lastMem = nextVal
+		} else {
+			// Store these returns in the map
+			// For later stores to the df array
+			// -1 because we start with 1
+			// Need to store based on AuxInt, multiple returns with the same AuxInt
+			// have occurred
+			realReturnValues[nextVal.AuxInt] = nextVal
+		}
+
+		retidx++
+		nextVal = d.initialValues[vidx+retidx]
+	}
+	vidx = vidx + retidx - 1
+	// The -1 is necessary as we incremented retidx before breaking out of the above loop
+
+	// NOTE: Concious chocie note to update blockdf with combined df of all input params
+	// Get block df from return [-1 is mem, -2 is blockdf]
+	// blockDfRet := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType,
+	// 	numResults-2, currentVal)
+	// d.currentBlockDf = d.currentBlock.NewValue2(valPos, OpOr64, dfBmType,
+	// 	d.currentBlockDf, blockDfRet)
+
+	// After accepting all returns, store the combined df value to the dataflow array
+	for _, retVal := range realReturnValues {
+		dfArr := d.currentBlock.NewValue2A(valPos, OpLocalAddr,
+			d.dfArrType.PtrTo(), d.dfArrName, d.sp, d.lastMem)
+		argDfPtr := d.currentBlock.NewValue1I(valPos, OpOffPtr, dfBmType.PtrTo(),
+			int64(retVal.ID)*dfBmType.Size(), dfArr)
+		d.lastMem = d.currentBlock.NewValue3A(valPos, OpStore, types.TypeMem, dfBmType,
+			argDfPtr, combinedDf, d.lastMem)
+
+		if retVal.Type.IsPtr() {
+			// Create dummy df arrays
+			var dummyDfArrLength int32
+			if retVal.Type.IsScalar() {
+				dummyDfArrLength = 1
+			} else {
+				dummyDfArrLength = int32(retVal.Type.NumComponents(true))
+			}
+
+			typelsym := reflectdata.TypeLinksym(dfBmType)
+			typeaddr := d.currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, d.sb)
+
+			numItemsConst := d.f.ConstInt32(types.Types[types.TINT32], dummyDfArrLength)
+			results := []*types.Type{dfBmType.PtrTo()}
+			aux := StaticAuxCall(newArrayFuncSym, d.f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type,
+				types.Types[types.TINT32]}, results))
+			call := d.currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
+			call.AddArgs(typeaddr, numItemsConst, d.lastMem)
+			d.lastMem = d.currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
+			newDfPtr := d.currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
+
+			call.AuxInt = 20 // It's always 16 for newobject calls, 20 for newarray due to additional size param
+
+			d.ptrToDfPtr[retVal.ID] = newDfPtr
+		}
+	}
 
 	return vidx
 }
@@ -1066,12 +1175,17 @@ func (d *dfInstrumentState) resetMem(currentVal *Value) {
 	d.lastMem = currentVal
 }
 
+func allocDummyDf() {
+
+}
+
 func dataflowInstrument(f *Func) {
 	if strings.HasPrefix(f.Name, "DfMark") {
 		log.Println("Yippeee!! " + f.Name)
 	}
 
 	if !f.Dataflow {
+		newArrayFuncSym = typecheck.LookupRuntimeFunc("newarray")
 		dfBmType = types.Types[types.TINT64]
 		sb := f.Blocks[0].Values[2]
 		for _, currentBlock := range f.Blocks {
@@ -1106,44 +1220,28 @@ func dataflowInstrument(f *Func) {
 							// TODO: Send a pointer to empty space instead
 							// argDf = append(argDf, f.ConstNil(dfBmType.PtrTo()))
 
+							var dummyDfArrLength int32
 							if arg1.Type.IsScalar() {
-
-								newobjfunc := typecheck.LookupRuntimeFunc("newobject")
-
-								typelsym := reflectdata.TypeLinksym(dfBmType)
-								typeaddr := currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, sb)
-
-								results := []*types.Type{dfBmType.PtrTo()}
-								aux := StaticAuxCall(newobjfunc, f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type}, results))
-								call := currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
-								call.AddArgs(typeaddr, lastMem)
-								lastMem = currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
-								newDfPtr := currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
-
-								call.AuxInt = 16 // It's always 16 for newobject calls
-
-								argDf = append(argDf, newDfPtr)
-
+								dummyDfArrLength = 1
 							} else {
-								numItems := arg1.Type.NumComponents(true)
-								newarrfunc := typecheck.LookupRuntimeFunc("newarray")
-
-								typelsym := reflectdata.TypeLinksym(dfBmType)
-								typeaddr := currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, sb)
-
-								numItemsConst := f.ConstInt32(types.Types[types.TINT32], int32(numItems))
-								results := []*types.Type{dfBmType.PtrTo()}
-								aux := StaticAuxCall(newarrfunc, f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type,
-									types.Types[types.TINT32]}, results))
-								call := currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
-								call.AddArgs(typeaddr, numItemsConst, lastMem)
-								lastMem = currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
-								newDfPtr := currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
-
-								call.AuxInt = 20 // It's always 16 for newobject calls
-
-								argDf = append(argDf, newDfPtr)
+								dummyDfArrLength = int32(arg1.Type.NumComponents(true))
 							}
+
+							typelsym := reflectdata.TypeLinksym(dfBmType)
+							typeaddr := currentBlock.NewValue1A(valPos, OpAddr, types.NewPtr(types.Types[types.TUINT8]), typelsym, sb)
+
+							numItemsConst := f.ConstInt32(types.Types[types.TINT32], dummyDfArrLength)
+							results := []*types.Type{dfBmType.PtrTo()}
+							aux := StaticAuxCall(newArrayFuncSym, f.ABIDefault.ABIAnalyzeTypes(nil, []*types.Type{typeaddr.Type,
+								types.Types[types.TINT32]}, results))
+							call := currentBlock.NewValue0A(valPos, OpStaticLECall, aux.LateExpansionResultType(), aux)
+							call.AddArgs(typeaddr, numItemsConst, lastMem)
+							lastMem = currentBlock.NewValue1I(valPos, OpSelectN, types.TypeMem, 1, call)
+							newDfPtr := currentBlock.NewValue1I(valPos, OpSelectN, dfBmType.PtrTo(), 0, call)
+
+							call.AuxInt = 20 // It's always 16 for newobject calls, 20 for newarray due to additional size param
+
+							argDf = append(argDf, newDfPtr)
 						}
 					}
 					argDf = append(argDf, f.ConstInt64(dfBmType, 0)) // blockdf arg
